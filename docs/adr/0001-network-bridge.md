@@ -43,7 +43,9 @@ the other crates are unchanged.
    because the target is the far end of a delayed loop through the network and the
    client's own simulation, and a stiff coupling feeds that loop's energy back into the
    hand. Force is capped at the 1.41 N continuous level by default, configurable to the
-   peak; `Unit`'s heat budget applies on top.
+   peak; `Unit`'s heat budget applies on top. While engaged, the force vector changes by
+   at most `force_rate_n_s` (default 20 N/s, so 0 to 1.41 N takes about 70 ms); cutting
+   force is never rate-limited.
 3. **Fail-safe gate.** Force needs, on every tick: an authenticated controller
    connected; an `arm` from it and the device armed; the unit registered; no latched
    fault; a target younger than the target timeout (default 200 ms, configurable from
@@ -77,8 +79,17 @@ the other crates are unchanged.
    `target {seq, p | null}`. Out: `hello {challenge, limits}`, `auth_ok`, `status`
    (pen, button, deadman, arm, gate reason, anchor, force, heat, target age), `error`.
    Unknown types or fields, another version, binary frames and non-finite or
-   out-of-range numbers are malformed. Targets are metres in the model frame; mapping
-   to and from a client's scene is the client's job.
+   out-of-range numbers are malformed. A target is either metres in the model frame or,
+   with a `view` in the same message, a point in the client's scene. The view is the
+   similarity transform `p_scene = origin + scale·R(rotation)·p_device` (unit
+   quaternion, scale in scene units per metre) into which the client folds its camera,
+   navigation and any transform of its content. The bridge maps scene targets into the
+   model frame with the inverse and reports the pen in scene coordinates as well.
+8. **Scene motion.** Because the view arrives with every target, moving the view moves
+   the target even when the held thing is still in the scene, and the hand feels it.
+   Navigation alone never produces a force step: the anchor moves no faster than its
+   slew limit, the force changes no faster than its rate limit, and both stay within
+   the caps. A view jump (a teleport) becomes a ramp of about 70 ms to the cap.
 
 ## Consequences
 
@@ -117,11 +128,15 @@ controller, arming once per request and rate-limited, ramp-in from zero, stale-t
 cut-off within one tick of the timeout, zero sent before the service after link loss,
 stall cut-off with a fresh release, a disarm and re-arm inside one tick restarting the
 deadman, link loss disarming, refusal latching, the cap under adversarial targets, an
-invalid configuration refused, clean thread stop and fault exit), the schema's strictness, the configuration
+invalid configuration refused, clean thread stop and fault exit; a view teleport and a
+2-turn-per-second view rotation each keep every per-tick force change within the rate
+limit and the force within the cap, while the force cut stays immediate), the view
+transform (axes, round trips, refusals), the schema's view rules, the schema's strictness, the configuration
 limits, the LAN policy and every authentication refusal. An end-to-end suite runs a real
 WebSocket on 127.0.0.1 against the simulated unit: an unauthenticated `arm`, an unknown
 key, a replayed signature, a signature naming another URL and an unlisted browser
-origin are refused; the happy path delivers force towards the
+origin are refused; a scene target through a rotated view pulls along the mapped
+direction and the pen comes back in scene coordinates; the happy path delivers force towards the
 target within the cap; a dropped socket, a clean close, a stalled target, a malformed
 text or binary message, idle silence, `disarm` and a null target each stop force; a
 second controller gets `busy` without disturbing the first. The guards were also

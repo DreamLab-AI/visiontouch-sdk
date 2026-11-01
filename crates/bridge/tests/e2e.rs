@@ -421,3 +421,37 @@ async fn a_signature_for_another_url_is_refused() {
     send(&mut ws, json!({"v":1,"type":"auth","event":event})).await;
     assert_eq!(recv_event(&mut ws).await.unwrap()["code"], "unauthorised");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scene_target_is_mapped_through_the_view() {
+    let r = rig().await;
+    let (mut ws, mut seq) = engaged(&r).await;
+    // A quarter turn about +Y: scene -Z is pen +X. Scale 1000 units per metre.
+    let h = std::f64::consts::FRAC_PI_4;
+    let view = json!({"origin":[300.,0.,0.],"rotation":[0.,h.sin(),0.,h.cos()],"scale":1000.});
+    let first = seq + 1;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "never settled on the mapped target"
+        );
+        seq += 1;
+        send(
+            &mut ws,
+            json!({"v":1,"type":"target","seq":seq,"p":[300.,0.,-10.],"view":view}),
+        )
+        .await;
+        let s = recv(&mut ws).await.unwrap();
+        if s["type"] == "status" && s["target_seq"].as_u64().is_some_and(|q| q >= first) {
+            let anchor = s["anchor"][0].as_f64().unwrap_or(0.);
+            if (anchor - 0.01).abs() < 1e-4 {
+                assert!(s["force"][0].as_f64().unwrap() > 0., "{s}");
+                // The pen (at the model origin) reported in the scene.
+                assert_eq!(s["pen_scene"], json!([300., 0., 0.]));
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+}

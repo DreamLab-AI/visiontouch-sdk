@@ -44,6 +44,7 @@
 //! | [`auth`] | Challenge and signature verification |
 //! | [`netpolicy`] | LAN-only bind and peer rules |
 //! | [`config`] | TOML configuration and its limits |
+//! | [`view`] | The view transform between the pen's workspace and a client's scene |
 //! | [`fake`] | A simulated unit for tests and client development |
 #![warn(missing_docs)]
 pub mod auth;
@@ -55,3 +56,4 @@ pub mod netpolicy;
 pub mod protocol;
 pub mod server;
 pub mod servo;
+pub mod view;

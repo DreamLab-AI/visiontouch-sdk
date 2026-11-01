@@ -5,9 +5,10 @@
 //! are all **malformed**: the bridge answers with an `error`, cuts force and closes the
 //! connection.
 //!
-//! Positions are metres in the device's model frame, relative to the registered reset
-//! pose, with Y up (the frame of `visiontouch_device::unit::State::position_m`). The
-//! client maps between that frame and its own scene; the bridge knows nothing about it.
+//! Device positions are metres in the model frame, relative to the registered reset
+//! pose, with Y up (the frame of `visiontouch_device::unit::State::position_m`). A
+//! client may instead send targets in its own scene coordinates together with the view
+//! transform that places the pen's workspace in that scene; see [`crate::view`].
 //!
 //! # Client to bridge
 //!
@@ -16,7 +17,7 @@
 //! | `auth` | `event`: a signed Nostr event | Must be the first message, within the auth deadline. See [`crate::auth`] |
 //! | `arm` | — | Ask for force to be armed. The deadman still gates it |
 //! | `disarm` | — | Turn force off |
-//! | `target` | `seq`: integer, `p`: `[x, y, z]` or `null` | The anchor for the coupling; `null` means nothing is held. Send at 20–30 Hz while connected, `null` included: it is also the liveness signal |
+//! | `target` | `seq`: integer, `p`: `[x, y, z]` or `null`, optional `view` | The anchor for the coupling; `null` means nothing is held. Without `view`, `p` is in the model frame (metres). With `view` (`{"origin": [x, y, z], "rotation": [x, y, z, w], "scale": s}`, see [`crate::view`]), `p` is in the client's scene and the bridge maps it; the view is also used to report the pen in scene coordinates. Send at 20–30 Hz while connected, `null` included: it is also the liveness signal |
 //!
 //! # Bridge to client
 //!
@@ -30,10 +31,11 @@
 //! ```
 //! use visiontouch_bridge::protocol::{ClientMsg, parse_client};
 //! let m = parse_client(r#"{"v":1,"type":"target","seq":7,"p":[0.01,-0.02,0.0]}"#).unwrap();
-//! assert_eq!(m, ClientMsg::Target { seq: 7, p: Some([0.01, -0.02, 0.0]) });
+//! assert_eq!(m, ClientMsg::Target { seq: 7, p: Some([0.01, -0.02, 0.0]), view: None });
 //! assert!(parse_client(r#"{"v":2,"type":"arm"}"#).is_err());
 //! ```
 use crate::gate::Reason;
+use crate::view::{MAX_SCENE_COORD, View};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -59,8 +61,10 @@ pub enum ClientMsg {
     Target {
         /// Client sequence number, echoed in status.
         seq: u64,
-        /// Target position, metres, model frame.
+        /// Target position: model-frame metres, or scene units when `view` is set.
         p: Option<[f64; 3]>,
+        /// The view transform, when `p` is in scene coordinates.
+        view: Option<View>,
     },
 }
 
@@ -100,24 +104,41 @@ fn only_fields(obj: &Map<String, Value>, allowed: &[&str]) -> Result<(), Malform
     Ok(())
 }
 
-fn parse_point(v: &Value) -> Result<[f64; 3], Malformed> {
+fn parse_numbers<const N: usize>(v: &Value, name: &str, max: f64) -> Result<[f64; N], Malformed> {
     let arr = v
         .as_array()
-        .ok_or_else(|| bad("`p` must be [x, y, z] or null"))?;
-    if arr.len() != 3 {
-        return Err(bad("`p` must have three coordinates"));
+        .ok_or_else(|| bad(format!("`{name}` must be an array of {N} numbers")))?;
+    if arr.len() != N {
+        return Err(bad(format!("`{name}` must have {N} numbers")));
     }
-    let mut p = [0.; 3];
-    for (slot, x) in p.iter_mut().zip(arr) {
+    let mut out = [0.; N];
+    for (slot, x) in out.iter_mut().zip(arr) {
         let x = x
             .as_f64()
-            .ok_or_else(|| bad("`p` coordinates must be numbers"))?;
-        if !x.is_finite() || x.abs() > MAX_COORD_M {
-            return Err(bad("`p` coordinate out of range"));
+            .ok_or_else(|| bad(format!("`{name}` must contain numbers")))?;
+        if !x.is_finite() || x.abs() > max {
+            return Err(bad(format!("`{name}` value out of range")));
         }
         *slot = x;
     }
-    Ok(p)
+    Ok(out)
+}
+
+fn parse_view(v: &Value) -> Result<View, Malformed> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| bad("`view` must be an object"))?;
+    only_fields(obj, &["origin", "rotation", "scale"])?;
+    let field = |k: &str| {
+        obj.get(k)
+            .ok_or_else(|| bad(format!("`view` is missing `{k}`")))
+    };
+    let origin = parse_numbers::<3>(field("origin")?, "origin", MAX_SCENE_COORD)?;
+    let rotation = parse_numbers::<4>(field("rotation")?, "rotation", 2.)?;
+    let scale = field("scale")?
+        .as_f64()
+        .ok_or_else(|| bad("`scale` must be a number"))?;
+    View::new(origin, rotation, scale).map_err(bad)
 }
 
 /// Parse one client text frame. Strict: see the module docs.
@@ -152,17 +173,23 @@ pub fn parse_client(text: &str) -> Result<ClientMsg, Malformed> {
             Ok(ClientMsg::Disarm)
         }
         "target" => {
-            only_fields(obj, &["v", "type", "seq", "p"])?;
+            only_fields(obj, &["v", "type", "seq", "p", "view"])?;
             let seq = obj
                 .get("seq")
                 .and_then(Value::as_u64)
                 .ok_or_else(|| bad("`seq` must be a non-negative integer"))?;
+            let view = obj.get("view").map(parse_view).transpose()?;
+            let max = if view.is_some() {
+                MAX_SCENE_COORD
+            } else {
+                MAX_COORD_M
+            };
             let p = match obj.get("p") {
                 None => return Err(bad("missing `p`")),
                 Some(Value::Null) => None,
-                Some(v) => Some(parse_point(v)?),
+                Some(v) => Some(parse_numbers::<3>(v, "p", max)?),
             };
-            Ok(ClientMsg::Target { seq, p })
+            Ok(ClientMsg::Target { seq, p, view })
         }
         other => Err(bad(format!("unknown type `{other}`"))),
     }
@@ -194,6 +221,9 @@ pub struct Status {
     pub t_ms: u64,
     /// Pen position, metres, model frame; `null` until registered.
     pub pen: Option<[f64; 3]>,
+    /// Pen position in scene coordinates through the last view sent; `null` without a
+    /// view.
+    pub pen_scene: Option<[f64; 3]>,
     /// Pen button held.
     pub button: bool,
     /// Whether the deadman has seen a release since force last became possible.
@@ -291,13 +321,18 @@ mod tests {
         );
         assert_eq!(
             parse_client(r#"{"v":1,"type":"target","seq":0,"p":null}"#),
-            Ok(ClientMsg::Target { seq: 0, p: None })
+            Ok(ClientMsg::Target {
+                seq: 0,
+                p: None,
+                view: None
+            })
         );
         assert_eq!(
             parse_client(r#"{"v":1,"type":"target","seq":3,"p":[0,0.5,-1]}"#),
             Ok(ClientMsg::Target {
                 seq: 3,
-                p: Some([0., 0.5, -1.])
+                p: Some([0., 0.5, -1.]),
+                view: None
             })
         );
     }
@@ -325,9 +360,43 @@ mod tests {
             r#"{"v":1,"type":"target","seq":1,"p":{"x":0}}"#,
             r#"{"v":1,"type":"auth"}"#,
             r#"{"v":1,"type":"auth","event":{"kind":1}}"#,
+            r#"{"v":1,"type":"target","seq":1,"p":[0,0,0],"view":{}}"#,
+            r#"{"v":1,"type":"target","seq":1,"p":[0,0,0],"view":{"origin":[0,0,0],"rotation":[0,0,0,1]}}"#,
+            r#"{"v":1,"type":"target","seq":1,"p":[0,0,0],"view":{"origin":[0,0,0],"rotation":[0,0,0,2],"scale":1}}"#,
+            r#"{"v":1,"type":"target","seq":1,"p":[0,0,0],"view":{"origin":[0,0,0],"rotation":[0,0,0,1],"scale":0}}"#,
+            r#"{"v":1,"type":"target","seq":1,"p":[0,0,0],"view":{"origin":[0,0],"rotation":[0,0,0,1],"scale":1}}"#,
+            r#"{"v":1,"type":"target","seq":1,"p":[0,0,0],"view":{"origin":[0,0,0],"rotation":[0,0,0,1],"scale":1,"skew":1}}"#,
+            r#"{"v":1,"type":"target","seq":1,"p":[0,2e7,0],"view":{"origin":[0,0,0],"rotation":[0,0,0,1],"scale":1}}"#,
         ] {
             assert!(parse_client(text).is_err(), "accepted: {text}");
         }
+    }
+
+    #[test]
+    fn scene_targets_carry_a_view() {
+        let m = parse_client(
+            r#"{"v":1,"type":"target","seq":4,"p":[250,-30,12],
+                "view":{"origin":[200,0,0],"rotation":[0,0,0,1],"scale":1000}}"#,
+        )
+        .unwrap();
+        let ClientMsg::Target { p, view, .. } = m else {
+            panic!("{m:?}")
+        };
+        assert_eq!(
+            p,
+            Some([250., -30., 12.]),
+            "scene coordinates may exceed 1 m"
+        );
+        let d = view.unwrap().to_device(p.unwrap());
+        assert!((d[0] - 0.05).abs() < 1e-12 && (d[1] + 0.03).abs() < 1e-12);
+        // A view with a null target is valid: it keeps the scene pen reported.
+        assert!(
+            parse_client(
+                r#"{"v":1,"type":"target","seq":5,"p":null,
+                    "view":{"origin":[0,0,0],"rotation":[0,0,0,1],"scale":1}}"#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -348,6 +417,7 @@ mod tests {
         let s = Status {
             t_ms: 1,
             pen: Some([0.; 3]),
+            pen_scene: None,
             button: true,
             deadman_ready: false,
             armed: true,

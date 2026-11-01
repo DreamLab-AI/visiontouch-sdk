@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::coupling::{Coupling, TargetFilter, VelocityFilter};
 use crate::gate::{Gate, GateIn, Reason};
 use crate::protocol::Status;
+use crate::view::View;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -83,6 +84,8 @@ pub struct Inbox {
     pub target: Option<Target>,
     /// Sequence number of the last target message, `null` targets included.
     pub target_seq: Option<u64>,
+    /// The view sent with the last target message, if it carried one.
+    pub view: Option<View>,
 }
 
 impl Inbox {
@@ -92,6 +95,7 @@ impl Inbox {
         self.arm_wanted = false;
         self.target = None;
         self.target_seq = None;
+        self.view = None;
     }
 }
 
@@ -112,6 +116,7 @@ pub fn fault_status(t_ms: u64) -> Status {
     Status {
         t_ms,
         pen: None,
+        pen_scene: None,
         button: false,
         deadman_ready: false,
         armed: false,
@@ -134,6 +139,8 @@ pub struct Servo<H> {
     filter: TargetFilter,
     gate: Gate,
     pen_v: VelocityFilter,
+    force_rate_n_s: f64,
+    last_force: [f64; 3],
     start: Instant,
     target_timeout: Duration,
     last_tick: Option<Instant>,
@@ -155,6 +162,8 @@ impl<H: Haptic> Servo<H> {
             filter: config.target_filter(),
             gate: Gate::new(config.target_timeout(), config.ramp()),
             pen_v: VelocityFilter::new(PEN_VELOCITY_TAU_S),
+            force_rate_n_s: config.coupling.force_rate_n_s,
+            last_force: [0.; 3],
             start,
             target_timeout: config.target_timeout(),
             last_tick: None,
@@ -259,7 +268,20 @@ impl<H: Haptic> Servo<H> {
                 Some((a, self.coupling.force(pen, pen_v, a, av, decision.ramp)?))
             }) {
                 Some((a, f)) => {
-                    force = f;
+                    // Rate-limit force changes while engaged, so no target motion
+                    // (scene navigation included) can produce a force step. Cutting
+                    // force is never rate-limited: off the engaged path it is zero.
+                    let step = [
+                        f[0] - self.last_force[0],
+                        f[1] - self.last_force[1],
+                        f[2] - self.last_force[2],
+                    ];
+                    let step = crate::coupling::limit(step, self.force_rate_n_s * dt);
+                    force = [
+                        self.last_force[0] + step[0],
+                        self.last_force[1] + step[1],
+                        self.last_force[2] + step[2],
+                    ];
                     anchor = Some(a);
                 }
                 None => {
@@ -273,10 +295,12 @@ impl<H: Haptic> Servo<H> {
             self.filter.clear();
         }
         self.dev.set_force(force);
+        self.last_force = force;
 
         Ok(Status {
             t_ms: now.saturating_duration_since(self.start).as_millis() as u64,
             pen: state.position_m,
+            pen_scene: state.position_m.zip(inbox.view).map(|(p, v)| v.to_scene(p)),
             button: state.button,
             deadman_ready: self.gate.seen_released(),
             armed: state.armed,
@@ -600,6 +624,108 @@ mod tests {
         r.inbox.arm_epoch += 1;
         let s = r.tick();
         assert_eq!((s.reason, s.force), (Reason::AwaitRelease, [0.; 3]));
+    }
+
+    /// Engage with the target on the pen (no force), then hand back the rig.
+    fn engaged_at_rest() -> Rig {
+        let mut r = Rig::new();
+        r.engaged();
+        r.inbox.target = Some(Target {
+            p: [0.; 3],
+            at: r.t,
+        });
+        r.ticks(400);
+        assert!(mag(r.tick().force) < 1e-6);
+        r
+    }
+
+    fn max_step(forces: &[[f64; 3]]) -> f64 {
+        forces
+            .windows(2)
+            .map(|w| mag([w[1][0] - w[0][0], w[1][1] - w[0][1], w[1][2] - w[0][2]]))
+            .fold(0., f64::max)
+    }
+
+    #[test]
+    fn a_view_teleport_ramps_force_and_never_steps_it() {
+        // Entering a room: the held node, fixed in the scene, jumps 10 cm across the
+        // pen's workspace in one message.
+        let mut r = engaged_at_rest();
+        let rate = config().coupling.force_rate_n_s;
+        let view = View::new([0.; 3], [0., 0., 0., 1.], 1000.).unwrap();
+        let node = [100., 0., 0.]; // 10 cm along +x once mapped
+        let mut forces = vec![[0.; 3]];
+        for _ in 0..400 {
+            r.inbox.target = Some(Target {
+                p: view.to_device(node),
+                at: r.t,
+            });
+            let s = r.tick();
+            assert!(mag(s.force) <= CONTINUOUS + 1e-9, "capped");
+            forces.push(s.force);
+        }
+        let per_tick = rate * SERVO_PERIOD.as_secs_f64();
+        assert!(
+            max_step(&forces) <= per_tick + 1e-9,
+            "{} > {per_tick}",
+            max_step(&forces)
+        );
+        assert!(
+            mag(forces[1]) <= per_tick + 1e-9,
+            "the first tick after the jump is small"
+        );
+        let last = *forces.last().unwrap();
+        assert!(
+            (mag(last) - CONTINUOUS).abs() < 1e-9 && last[0] > 0.,
+            "{last:?}"
+        );
+    }
+
+    #[test]
+    fn fast_view_rotation_is_felt_but_bounded() {
+        // Navigation spinning the view at 2 turns/s around a node 5 cm from the pen.
+        let mut r = engaged_at_rest();
+        let rate = config().coupling.force_rate_n_s;
+        let node = [0., 0., -50.];
+        let mut forces = vec![[0.; 3]];
+        for i in 0..800 {
+            let a = 2. * std::f64::consts::TAU * i as f64 * SERVO_PERIOD.as_secs_f64();
+            let q = [0., (a / 2.).sin(), 0., (a / 2.).cos()];
+            let view = View::new([0.; 3], q, 1000.).unwrap();
+            r.inbox.target = Some(Target {
+                p: view.to_device(node),
+                at: r.t,
+            });
+            let s = r.tick();
+            assert!(mag(s.force) <= CONTINUOUS + 1e-9);
+            forces.push(s.force);
+        }
+        assert!(max_step(&forces) <= rate * SERVO_PERIOD.as_secs_f64() + 1e-9);
+        assert!(forces.iter().any(|f| mag(*f) > 0.5), "navigation is felt");
+    }
+
+    #[test]
+    fn cutting_force_is_never_rate_limited() {
+        let mut r = Rig::new();
+        assert!((mag(r.engaged().force) - CONTINUOUS).abs() < 1e-9);
+        r.fake.set_button(false);
+        // The release is read in this service (which sent the force queued before it);
+        // the force commanded in response is zero at once, not ramped down.
+        let s = r.tick();
+        assert_eq!(s.force, [0.; 3]);
+        assert_eq!(r.tick().applied_n, 0.);
+    }
+
+    #[test]
+    fn the_pen_is_reported_in_scene_coordinates_through_the_view() {
+        let mut r = Rig::new();
+        r.fake.set_pen([0.01, 0.02, 0.]);
+        r.inbox.view = Some(View::new([5., 0., 0.], [0., 0., 0., 1.], 100.).unwrap());
+        let s = r.tick();
+        let p = s.pen_scene.unwrap();
+        assert!((p[0] - 6.).abs() < 1e-9 && (p[1] - 2.).abs() < 1e-9);
+        r.inbox.view = None;
+        assert_eq!(r.tick().pen_scene, None);
     }
 
     #[test]

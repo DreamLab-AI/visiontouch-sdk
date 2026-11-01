@@ -17,6 +17,7 @@
 //! target_max_speed_m_s = 0.25
 //! target_tau_ms = 30
 //! ramp_ms = 250
+//! force_rate_n_s = 20               # largest force change per second while engaged
 //!
 //! [link]
 //! target_timeout_ms = 200           # 50..=250
@@ -68,6 +69,10 @@ pub struct CouplingConfig {
     pub target_tau_ms: u64,
     /// Engage ramp, ms, in `[50, 2000]`.
     pub ramp_ms: u64,
+    /// Largest change of the force vector per second while engaged, N/s, in
+    /// `[5, 200]`. Bounds how fast target motion (physics or scene navigation) can
+    /// change the force; cutting force is never rate-limited.
+    pub force_rate_n_s: f64,
 }
 
 impl Default for CouplingConfig {
@@ -81,6 +86,7 @@ impl Default for CouplingConfig {
             target_max_speed_m_s: 0.25,
             target_tau_ms: 30,
             ramp_ms: 250,
+            force_rate_n_s: 20.,
         }
     }
 }
@@ -184,6 +190,7 @@ impl Config {
         range("target_max_speed_m_s", k.target_max_speed_m_s, 0., 1., true)?;
         range("target_tau_ms", k.target_tau_ms as f64, 0., 200., false)?;
         range("ramp_ms", k.ramp_ms as f64, 50., 2000., false)?;
+        range("force_rate_n_s", k.force_rate_n_s, 5., 200., false)?;
         let l = &self.link;
         let (lo, hi) = TARGET_TIMEOUT_RANGE_MS;
         range(
@@ -328,6 +335,21 @@ mod tests {
             Config::from_toml(&t).is_err(),
             "damping cap above total cap"
         );
+    }
+
+    #[test]
+    fn the_force_rate_is_bounded() {
+        assert_eq!(
+            Config::from_toml(&minimal())
+                .unwrap()
+                .coupling
+                .force_rate_n_s,
+            20.
+        );
+        for (v, ok) in [("4.9", false), ("5", true), ("200", true), ("201", false)] {
+            let t = format!("{}[coupling]\nforce_rate_n_s = {v}\n", minimal());
+            assert_eq!(Config::from_toml(&t).is_ok(), ok, "{v}");
+        }
     }
 
     #[test]

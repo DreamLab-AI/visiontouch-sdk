@@ -22,6 +22,7 @@ use crate::config::Config;
 use crate::netpolicy;
 use crate::protocol::{ClientMsg, ErrorCode, ServerMsg, Status, parse_client};
 use crate::servo::{SharedInbox, Target};
+use crate::view::View;
 use futures_util::{SinkExt, StreamExt};
 use std::io;
 use std::net::SocketAddr;
@@ -316,9 +317,16 @@ impl Bridge {
                                     inbox.arm_wanted = false;
                                     None
                                 }
-                                ClientMsg::Target { seq, p } => {
-                                    inbox.target = p.map(|p| Target { p, at: Instant::now() });
+                                ClientMsg::Target { seq, p, view } => {
+                                    // Scene targets are mapped into the model frame here,
+                                    // with the view sent in the same message.
+                                    let device = |p| view.map_or(p, |v: View| v.to_device(p));
+                                    inbox.target = p.map(|p| Target {
+                                        p: device(p),
+                                        at: Instant::now(),
+                                    });
                                     inbox.target_seq = Some(seq);
+                                    inbox.view = view;
                                     None
                                 }
                                 ClientMsg::Auth { .. } => {

@@ -21,6 +21,7 @@ workspace_radius_m = 0.12
 target_max_speed_m_s = 0.25
 target_tau_ms = 30
 ramp_ms = 250
+force_rate_n_s = 20        # largest force change per second while engaged (5..=200)
 
 [link]
 target_timeout_ms = 200    # 50..=250
