@@ -97,6 +97,12 @@ impl Gate {
         }
     }
 
+    /// Clear the deadman latch and the engage ramp: force needs a fresh release.
+    pub fn reset(&mut self) {
+        self.seen_released = false;
+        self.engaged_since = None;
+    }
+
     /// Whether the deadman latch has seen a release.
     pub fn seen_released(&self) -> bool {
         self.seen_released

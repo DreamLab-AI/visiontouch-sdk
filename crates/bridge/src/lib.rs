@@ -13,16 +13,19 @@
 //! - **Fail safe on every link failure.** Force stops on the next servo tick if the
 //!   socket drops, if no message arrives within the idle timeout, if no target has
 //!   arrived within the target timeout (default 200 ms), or on any malformed message;
-//!   the SDK's own 25 ms stale-output rule stays the inner guard. See [`gate`].
+//!   zero is queued before the next device service, and a servo stall over 10 ms also
+//!   cuts force. The SDK's own 25 ms stale-output rule stays the inner guard. See
+//!   [`gate`] and [`servo`].
 //! - **Deadman.** Force flows only while the pen button is held, and only after it has
-//!   been seen released since the last arm, reconnect or fault.
+//!   been seen released since the last arm request, reconnect, fault or stall.
 //! - **Gentle engage.** When force becomes allowed the anchor starts at the pen, travels
 //!   to the target at a bounded speed, and the force ramps from zero.
 //! - **Bounded output.** Stiffness is capped at half the unit's stable 2 N/mm, force at
 //!   the configured cap (default the 1.41 N continuous level), and the SDK's heat
 //!   budget applies on top. See [`config`].
 //! - **Authenticated control.** A Nostr-key challenge ([`auth`]) against an allowlist,
-//!   one controller at a time, LAN-only by default ([`netpolicy`]). No message before
+//!   one controller at a time, LAN-only by default ([`netpolicy`]), browser origins
+//!   only when listed. No message before
 //!   authentication can arm anything, and taking control never arms by itself.
 //!
 //! # Wire schema

@@ -2,9 +2,9 @@
 //!
 //! ```toml
 //! bind = "192.168.1.20:7341"        # this machine's LAN address; default 127.0.0.1:7341
-//! url = "ws://192.168.1.20:7341"    # optional: the URL clients must name when signing
+//! url = "ws://192.168.1.20:7341"    # required: the URL clients must name when signing
 //! authorised_keys = ["npub1..."]    # required: hex or npub keys allowed to control the arm
-//! # allowed_origins = ["http://desktop.lan:3001"]  # optional browser Origin allowlist
+//! # allowed_origins = ["http://desktop.lan:3001"]  # browser pages allowed to connect
 //! # allow_public = false            # wildcard or public bind and public peers
 //! # device = "/dev/parport0"
 //!
@@ -120,13 +120,15 @@ pub struct Config {
     /// Allow a wildcard or public bind and public peers.
     #[serde(default)]
     pub allow_public: bool,
-    /// The URL clients must name in their signed `relay` tag, if set.
-    #[serde(default)]
-    pub url: Option<String>,
+    /// The URL clients must name in their signed `relay` tag. Required: without it a
+    /// hostile service could relay this bridge's challenge to a user and replay the
+    /// signature here.
+    pub url: String,
     /// Keys (hex or npub) allowed to control the arm. Must not be empty.
     pub authorised_keys: Vec<String>,
-    /// Browser `Origin` values allowed to connect; empty allows any (non-browser
-    /// clients send none).
+    /// Browser `Origin` values allowed to connect. A request carrying an `Origin`
+    /// header not in this list is refused, so an empty list admits only non-browser
+    /// clients (which send none).
     #[serde(default)]
     pub allowed_origins: Vec<String>,
     /// Parallel port device.
@@ -223,9 +225,15 @@ impl Config {
                 nostr::key::PublicKey::parse(k).map_err(|e| format!("authorised key `{k}`: {e}"))
             })
             .collect::<Result<_, _>>()?;
+        if !(self.url.starts_with("ws://") || self.url.starts_with("wss://")) {
+            return Err(format!(
+                "url `{}` must start with ws:// or wss://",
+                self.url
+            ));
+        }
         Ok(AuthPolicy {
             allowed,
-            url: self.url.clone(),
+            url: Some(self.url.clone()),
         })
     }
 
@@ -280,7 +288,7 @@ mod tests {
     const KEY: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
     fn minimal() -> String {
-        format!("authorised_keys = [\"{KEY}\"]\n")
+        format!("url = \"ws://bridge:7341\"\nauthorised_keys = [\"{KEY}\"]\n")
     }
 
     #[test]
@@ -340,8 +348,12 @@ mod tests {
 
     #[test]
     fn keys_bind_and_unknown_fields_are_checked() {
-        assert!(Config::from_toml("authorised_keys = []\n").is_err());
-        assert!(Config::from_toml("authorised_keys = [\"nope\"]\n").is_err());
+        assert!(Config::from_toml("url = \"ws://b\"\nauthorised_keys = []\n").is_err());
+        assert!(Config::from_toml("url = \"ws://b\"\nauthorised_keys = [\"nope\"]\n").is_err());
+        let no_url = format!("authorised_keys = [\"{KEY}\"]\n");
+        assert!(Config::from_toml(&no_url).is_err(), "url is required");
+        let bad_url = format!("url = \"http://b\"\nauthorised_keys = [\"{KEY}\"]\n");
+        assert!(Config::from_toml(&bad_url).is_err());
         assert!(Config::from_toml("").is_err(), "keys are required");
         let t = format!("bind = \"0.0.0.0:7341\"\n{}", minimal());
         assert!(Config::from_toml(&t).is_err());

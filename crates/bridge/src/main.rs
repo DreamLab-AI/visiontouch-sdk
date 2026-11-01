@@ -107,7 +107,7 @@ fn serve<H: Haptic + Send + 'static>(unit: H, config: Config) -> Result<H, Strin
     let (status_tx, status_rx) = tokio::sync::watch::channel(initial);
     let stop = Arc::new(AtomicBool::new(false));
     let servo_thread = servo::spawn(
-        Servo::new(unit, &config, start),
+        Servo::new(unit, &config, start)?,
         inbox.clone(),
         status_tx,
         stop.clone(),
@@ -132,7 +132,9 @@ fn serve<H: Haptic + Send + 'static>(unit: H, config: Config) -> Result<H, Strin
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                if shutdown::requested() || status_rx.borrow().device_fault {
+                // A dropped sender means the servo thread has ended.
+                let servo_gone = status_rx.has_changed().is_err();
+                if shutdown::requested() || servo_gone || status_rx.borrow().device_fault {
                     let _ = shutdown_tx.send(true);
                     break;
                 }

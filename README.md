@@ -139,7 +139,7 @@ the bridge pulls the pen towards it with a local virtual coupling,
 streams back the pen pose, the button, the arm state and the heat budget.
 
 ```sh
-cp crates/bridge/bridge.example.toml bridge.toml   # set bind, url, authorised_keys
+cp crates/bridge/bridge.example.toml bridge.toml   # set bind, url, authorised_keys, allowed_origins
 cargo run -p visiontouch-bridge -- --config bridge.toml          # the arm
 cargo run -p visiontouch-bridge -- --config bridge.toml --fake   # a simulated arm
 ```
@@ -151,9 +151,9 @@ button is held, after it has been seen released.
 | | |
 |---|---|
 | Schema | Versioned JSON text frames (`"v": 1`): `auth`, `arm`, `disarm`, `target` in; `hello`, `auth_ok`, `status`, `error` out. Documented in the crate's `protocol` module |
-| Authentication | The bridge sends a random challenge; the client answers with a Nostr event of kind 22242 (NIP-42) signed by a key in `authorised_keys`. One controller at a time |
-| Network | Binds to a loopback or LAN address and accepts LAN peers only, unless `allow_public = true`. Optional browser `Origin` allowlist. Plain `ws://`: a page served over `https` needs a TLS proxy in front |
-| Fail-safe | Force stops on the next servo tick when the socket closes, when a malformed message arrives (the connection is also closed), when no message arrives within the idle timeout, or when no target arrives within the target timeout (default 200 ms). The SDK's 25 ms stale-output rule stays underneath |
+| Authentication | The bridge sends a random challenge; the client answers with a Nostr event of kind 22242 (NIP-42) naming the bridge's `url`, signed by a key in `authorised_keys`. One controller at a time |
+| Network | Binds to a loopback or LAN address and accepts LAN peers only, unless `allow_public = true`. A browser page must be listed in `allowed_origins`. Plain `ws://`: the link must be trusted, and a page served over `https` needs a TLS proxy in front |
+| Fail-safe | Force stops on the next servo tick when the socket closes, when a malformed message arrives (the connection is also closed), when no message arrives within the idle timeout, or when no target arrives within the target timeout (default 200 ms). Zero goes out before the next service, and a servo stall over 10 ms also cuts force and needs a fresh button release. The SDK's 25 ms stale-output rule stays underneath |
 | Limits | Stiffness at most 1 N/mm (half the stable 2 N/mm; default 0.4), force capped at the 1.41 N continuous level by default (configurable to the peak), and the heat budget on top. Force ramps in from zero when it engages, with the anchor starting at the pen |
 | Targets | Metres in the model frame. The client maps its scene to the pen's workspace; the bridge clamps targets to a sphere about the origin and smooths them with a slew limit and a low-pass |
 

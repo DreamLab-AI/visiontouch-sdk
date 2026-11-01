@@ -3,11 +3,12 @@
 # This machine's LAN (or loopback) address. Wildcard and public addresses are refused
 # unless allow_public = true.
 bind = "127.0.0.1:7341"
-# The URL clients must name in the signed `relay` tag. Optional but recommended.
-# url = "ws://192.168.1.20:7341"
+# The URL clients connect to; they must name it in the signed `relay` tag. Required.
+url = "ws://127.0.0.1:7341"
 # Nostr keys (hex or npub) allowed to control the arm. Required.
 authorised_keys = ["<hex-or-npub>"]
-# Browser Origin values allowed to connect; empty allows any.
+# Browser pages allowed to connect (their Origin). A browser not listed here is
+# refused; clients that send no Origin (non-browser) are not affected.
 # allowed_origins = ["http://desktop.lan:3001"]
 # device = "/dev/parport0"
 

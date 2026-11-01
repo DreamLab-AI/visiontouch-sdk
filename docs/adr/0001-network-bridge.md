@@ -48,15 +48,21 @@ the other crates are unchanged.
    connected; an `arm` from it and the device armed; the unit registered; no latched
    fault; a target younger than the target timeout (default 200 ms, configurable from
    50 to 250 ms); and the deadman. A socket close, a malformed message (also closing the
-   connection) or silence past the idle timeout releases control and disarms. When
-   force becomes allowed the anchor starts at the pen and the force ramps from zero.
-   The SDK's 25 ms rule stays the inner guard.
+   connection) or silence past the idle timeout releases control and disarms. Zero is
+   queued before the next device service whenever the link, the arm request or the
+   target has gone, so a lost link never gets one more period of the old force. A
+   servo tick more than 10 ms late counts as a stall: zero first, and the deadman must
+   be released again. A panic in the servo loop is caught, zeroes and disarms, and ends
+   the bridge. When force becomes allowed the anchor starts at the pen and the force
+   ramps from zero. The SDK's 25 ms rule stays the inner guard.
 4. **Deadman.** The pen button, held, and only after it has been seen released since
-   the last arm, reconnect or fault, as the README requires of every integrator.
+   the last arm request, reconnect, fault or stall, as the README requires of every
+   integrator. Arm attempts are spaced at least 500 ms apart.
 5. **Authentication.** On connect the bridge sends a 32-byte random challenge; the
    client must answer first, within the auth timeout, with a Nostr event of kind 22242
    (the NIP-42 client-authentication kind) that carries the challenge and the bridge
-   URL, signed by a key in the configured allowlist. Verification uses the maintained
+   URL (the configured `url`, required, so a challenge relayed through another
+   service is refused), signed by a key in the configured allowlist. Verification uses the maintained
    `nostr` crate; nothing cryptographic is implemented here. A NIP-98 header was
    considered and rejected: browsers cannot set headers on a WebSocket upgrade, so the
    event would have to travel in the URL, logged and replayable within its time window,
@@ -64,8 +70,9 @@ the other crates are unchanged.
    time; a second authenticated client is told `busy`. Taking control never arms.
 6. **Network policy.** The listen address is set in the configuration. A wildcard or
    public address, and any non-loopback, non-private, non-link-local peer, is refused
-   unless `allow_public = true`. An optional browser `Origin` allowlist guards against a
-   page the operator did not intend. Frames are capped at 8 KiB.
+   unless `allow_public = true`. A request carrying a browser `Origin` is refused
+   unless that origin is listed, so a page the operator did not choose cannot reach the
+   arm through a permissive signer. Frames are capped at 8 KiB and connections at 8.
 7. **Schema.** Versioned JSON text frames, `"v": 1`. In: `auth`, `arm`, `disarm`,
    `target {seq, p | null}`. Out: `hello {challenge, limits}`, `auth_ok`, `status`
    (pen, button, deadman, arm, gate reason, anchor, force, heat, target age), `error`.
@@ -81,8 +88,13 @@ the other crates are unchanged.
   that wants the user to feel its simulation must let that simulation move the target
   away from the pen; a target that simply copies the pen yields only a light drag
   proportional to the round-trip delay.
-- Transport is plain `ws://`. A client page served over `https` needs a TLS proxy in
-  front of the bridge, or a later TLS option.
+- Transport is plain `ws://` and authentication covers the connection, not each
+  message, so the LAN segment must be trusted: an attacker able to hijack the TCP
+  stream after authentication could send targets (still bounded by the caps and the
+  deadman). A client page served over `https` needs a TLS proxy in front of the
+  bridge, which also closes that gap; a built-in TLS option is follow-up work.
+- Eight silent unauthenticated sockets can hold every connection slot for the auth
+  timeout; that is an availability cost on the LAN, not a safety one.
 - The client's clock does not matter: the bridge stamps targets on arrival, so the
   target timeout measures the link as the bridge sees it.
 - Registration stays a local act: the operator clicks the pen in its seat when the
@@ -95,14 +107,22 @@ the other crates are unchanged.
 coupling maths and every cap, the target filter (slew, clamp, staircase smoothing), each
 gate rule including the deadman latch and its reset on link loss, disarm, fault, device
 loss and registration, the servo loop against a simulated unit (no force without a
-controller, arming once per request, ramp-in from zero, stale-target cut-off within one
-tick of the timeout, link loss disarming, refusal latching, the cap under adversarial
-targets, clean thread stop and fault exit), the schema's strictness, the configuration
+controller, arming once per request and rate-limited, ramp-in from zero, stale-target
+cut-off within one tick of the timeout, zero sent before the service after link loss,
+stall cut-off with a fresh release, a disarm and re-arm inside one tick restarting the
+deadman, link loss disarming, refusal latching, the cap under adversarial targets, an
+invalid configuration refused, clean thread stop and fault exit), the schema's strictness, the configuration
 limits, the LAN policy and every authentication refusal. An end-to-end suite runs a real
 WebSocket on 127.0.0.1 against the simulated unit: an unauthenticated `arm`, an unknown
-key and a replayed signature are refused; the happy path delivers force towards the
+key, a replayed signature, a signature naming another URL and an unlisted browser
+origin are refused; the happy path delivers force towards the
 target within the cap; a dropped socket, a clean close, a stalled target, a malformed
 text or binary message, idle silence, `disarm` and a null target each stop force; a
 second controller gets `busy` without disturbing the first. The guards were also
 removed one at a time and the matching tests seen to fail. Activation is inactive: the
-bridge has not run on the arm, and no test opens the port.
+bridge has not run on the arm, and no test opens the port. An independent security
+review of the crate found no path to force without authentication or past the caps;
+the defects it found (a servo panic going unnoticed, no stall cut-off, a one-period
+window after link loss, a fast disarm and re-arm skipping the deadman reset, a leaked
+connection slot on panic, unescaped client text in logs) are fixed and tested, and
+its remaining hardening notes are recorded under Consequences.

@@ -27,6 +27,11 @@ pub const SERVO_PERIOD: Duration = Duration::from_micros(2400);
 const MAX_DT_S: f64 = 0.025;
 /// Pen velocity low-pass time constant, s.
 const PEN_VELOCITY_TAU_S: f64 = 0.01;
+/// A gap between ticks longer than this is a stall: force is zeroed before the next
+/// service and the deadman latch is cleared, so output resumes only after a release.
+pub const MAX_TICK_GAP: Duration = Duration::from_millis(10);
+/// Shortest interval between two attempts to arm the device.
+pub const ARM_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
 /// What the servo loop needs from a device. Implemented for
 /// [`visiontouch_device::unit::Unit`], and by [`crate::fake::FakeUnit`] for tests.
@@ -130,26 +135,34 @@ pub struct Servo<H> {
     gate: Gate,
     pen_v: VelocityFilter,
     start: Instant,
+    target_timeout: Duration,
     last_tick: Option<Instant>,
+    last_epoch: Option<u64>,
     fault_epoch: Option<u64>,
     arm_attempt_epoch: Option<u64>,
+    last_arm_attempt: Option<Instant>,
 }
 
 impl<H: Haptic> Servo<H> {
     /// A servo loop for `dev` with the configured coupling and timeouts. `start` is the
-    /// zero of `Status::t_ms`.
-    pub fn new(dev: H, config: &Config, start: Instant) -> Self {
-        Self {
+    /// zero of `Status::t_ms`. The configuration is validated again here, so a caller
+    /// cannot bypass its limits.
+    pub fn new(dev: H, config: &Config, start: Instant) -> Result<Self, String> {
+        config.validate()?;
+        Ok(Self {
             dev,
             coupling: config.coupling(),
             filter: config.target_filter(),
             gate: Gate::new(config.target_timeout(), config.ramp()),
             pen_v: VelocityFilter::new(PEN_VELOCITY_TAU_S),
             start,
+            target_timeout: config.target_timeout(),
             last_tick: None,
+            last_epoch: None,
             fault_epoch: None,
             arm_attempt_epoch: None,
-        }
+            last_arm_attempt: None,
+        })
     }
 
     /// The device.
@@ -170,20 +183,42 @@ impl<H: Haptic> Servo<H> {
 
     /// One tick at time `now` with the network's latest `inbox`. Any error is a device
     /// fault: output is off and the loop must stop.
+    ///
+    /// Before the device is serviced, the force queued last tick is replaced by zero
+    /// if the link, the arm request or the target has gone, or the loop stalled, so a
+    /// lost link never gets one more period of the old force.
     pub fn step(&mut self, now: Instant, inbox: Inbox) -> io::Result<Status> {
-        let dt = self
-            .last_tick
-            .map(|t| now.saturating_duration_since(t).as_secs_f64().min(MAX_DT_S))
-            .unwrap_or(0.);
+        let gap = self.last_tick.map(|t| now.saturating_duration_since(t));
+        let dt = gap.map(|g| g.as_secs_f64().min(MAX_DT_S)).unwrap_or(0.);
         self.last_tick = Some(now);
-
-        let state = self.dev.service()?;
+        let stalled = gap.is_some_and(|g| g > MAX_TICK_GAP);
         let epoch = inbox.arm_epoch;
+        // A new arm request (even one that followed a disarm within a single tick) or a
+        // stall restarts the deadman: force needs a fresh release.
+        let new_epoch = self.last_epoch.is_some_and(|e| e != epoch);
+        self.last_epoch = Some(epoch);
+        if stalled || new_epoch {
+            self.gate.reset();
+            self.filter.clear();
+        }
+
         let link_up = inbox.controller.is_some();
         let fault = self.fault_epoch == Some(epoch);
         let want = link_up && inbox.arm_wanted && !fault;
-        if want && !state.armed && self.arm_attempt_epoch != Some(epoch) {
+        let fresh = inbox
+            .target
+            .is_some_and(|t| now.saturating_duration_since(t.at) <= self.target_timeout);
+        if stalled || !want || !fresh {
+            self.dev.set_force([0.; 3]);
+        }
+
+        let state = self.dev.service()?;
+        let may_retry = self
+            .last_arm_attempt
+            .is_none_or(|t| now.saturating_duration_since(t) >= ARM_RETRY_INTERVAL);
+        if want && !state.armed && self.arm_attempt_epoch != Some(epoch) && may_retry {
             self.arm_attempt_epoch = Some(epoch);
+            self.last_arm_attempt = Some(now);
             if self.dev.arm().is_err() {
                 self.fault_epoch = Some(epoch);
             }
@@ -279,18 +314,25 @@ pub fn spawn<H: Haptic + Send + 'static>(
                     break servo.shutdown();
                 }
                 let now = Instant::now();
-                match servo.step(now, snapshot(&inbox)) {
-                    Ok(s) => {
+                let stepped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    servo.step(now, snapshot(&inbox))
+                }));
+                let failed = match stepped {
+                    Ok(Ok(s)) => {
                         status.send_replace(s);
+                        None
                     }
-                    Err(e) => {
-                        let t = now.saturating_duration_since(servo.start).as_millis() as u64;
-                        status.send_replace(fault_status(t));
-                        // Output is already shut down by the device on a fault; try
-                        // once more to be sure, ignoring a second error.
-                        let _ = servo.shutdown();
-                        break Err(e);
-                    }
+                    Ok(Err(e)) => Some(e),
+                    Err(_) => Some(io::Error::other("servo loop panicked")),
+                };
+                if let Some(e) = failed {
+                    let t = now.saturating_duration_since(servo.start).as_millis() as u64;
+                    status.send_replace(fault_status(t));
+                    // The device shuts output down on a fault; zero and disarm once more
+                    // to be sure, ignoring a second error or panic.
+                    let _ =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| servo.shutdown()));
+                    break Err(e);
                 }
                 next += period;
                 match next.checked_duration_since(Instant::now()) {
@@ -310,7 +352,10 @@ mod tests {
     const KEY: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
     fn config() -> Config {
-        Config::from_toml(&format!("authorised_keys = [\"{KEY}\"]\n")).unwrap()
+        Config::from_toml(&format!(
+            "url = \"ws://bridge\"\nauthorised_keys = [\"{KEY}\"]\n"
+        ))
+        .unwrap()
     }
 
     struct Rig {
@@ -325,7 +370,7 @@ mod tests {
             let fake = FakeUnit::registered();
             let t = Instant::now();
             Self {
-                servo: Servo::new(fake.clone(), &config(), t),
+                servo: Servo::new(fake.clone(), &config(), t).unwrap(),
                 fake,
                 inbox: Inbox::default(),
                 t,
@@ -511,7 +556,57 @@ mod tests {
         assert_eq!(r.ticks(10).reason, Reason::Fault, "still latched");
         r.inbox.arm_epoch += 1;
         let s = r.ticks(3);
+        assert!(!s.armed, "arm attempts are rate-limited");
+        let s = r.ticks(250);
         assert!(s.armed);
+        assert_eq!(r.fake.snapshot().arm_calls, 2);
+    }
+
+    #[test]
+    fn link_loss_sends_zero_before_the_next_service() {
+        let mut r = Rig::new();
+        r.engaged();
+        r.inbox.release();
+        let s = r.tick();
+        // The fake reports what it delivered during this service: already zero.
+        assert_eq!(s.applied_n, 0.);
+    }
+
+    #[test]
+    fn a_stalled_loop_zeroes_force_and_needs_a_new_release() {
+        let mut r = Rig::new();
+        assert!(mag(r.engaged().force) > 0.);
+        r.t += MAX_TICK_GAP + Duration::from_millis(1);
+        if let Some(tg) = &mut r.inbox.target {
+            tg.at = r.t;
+        }
+        let s = r.servo.step(r.t, r.inbox).unwrap();
+        assert_eq!(
+            s.applied_n, 0.,
+            "zero went out with the first service after the stall"
+        );
+        assert_eq!((s.reason, s.force), (Reason::AwaitRelease, [0.; 3]));
+        r.fake.set_button(false);
+        r.tick();
+        r.fake.set_button(true);
+        assert_eq!(r.ticks(2).reason, Reason::Engaged);
+    }
+
+    #[test]
+    fn disarm_and_arm_within_one_tick_still_restart_the_deadman() {
+        let mut r = Rig::new();
+        r.engaged();
+        // The servo never sees arm_wanted = false, only a new epoch.
+        r.inbox.arm_epoch += 1;
+        let s = r.tick();
+        assert_eq!((s.reason, s.force), (Reason::AwaitRelease, [0.; 3]));
+    }
+
+    #[test]
+    fn an_invalid_config_is_refused() {
+        let mut c = config();
+        c.coupling.stiffness_n_mm = 5.;
+        assert!(Servo::new(FakeUnit::registered(), &c, Instant::now()).is_err());
     }
 
     #[test]
@@ -564,7 +659,7 @@ mod tests {
         let (tx, rx) = tokio::sync::watch::channel(fault_status(0));
         let stop = Arc::new(AtomicBool::new(false));
         let h = spawn(
-            Servo::new(fake.clone(), &config(), Instant::now()),
+            Servo::new(fake.clone(), &config(), Instant::now()).unwrap(),
             inbox,
             tx,
             stop.clone(),
@@ -589,7 +684,7 @@ mod tests {
         initial.device_fault = false;
         let (tx, rx) = tokio::sync::watch::channel(initial);
         let h = spawn(
-            Servo::new(fake.clone(), &config(), Instant::now()),
+            Servo::new(fake.clone(), &config(), Instant::now()).unwrap(),
             Arc::default(),
             tx,
             Arc::new(AtomicBool::new(false)),

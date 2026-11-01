@@ -37,7 +37,7 @@ impl Drop for Rig {
 async fn rig() -> Rig {
     let keys = Keys::generate();
     let config = Config::from_toml(&format!(
-        "authorised_keys = [\"{}\"]\n[link]\ntarget_timeout_ms = {TARGET_TIMEOUT_MS}\n\
+        "url = \"ws://bridge\"\nauthorised_keys = [\"{}\"]\n[link]\ntarget_timeout_ms = {TARGET_TIMEOUT_MS}\n\
          idle_timeout_ms = 400\nauth_timeout_ms = 1000\nstatus_hz = 100\n",
         keys.public_key().to_hex()
     ))
@@ -49,7 +49,7 @@ async fn rig() -> Rig {
     let (tx, rx) = tokio::sync::watch::channel(initial);
     let stop = Arc::new(AtomicBool::new(false));
     servo::spawn(
-        Servo::new(fake.clone(), &config, Instant::now()),
+        Servo::new(fake.clone(), &config, Instant::now()).unwrap(),
         inbox.clone(),
         tx,
         stop.clone(),
@@ -394,4 +394,30 @@ async fn a_clean_close_zeroes_force_promptly() {
     )
     .await;
     assert!(took < Duration::from_millis(TARGET_TIMEOUT_MS), "{took:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_browser_origin_not_on_the_list_is_refused() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let r = rig().await;
+    let mut req = r.url.as_str().into_client_request().unwrap();
+    req.headers_mut()
+        .insert("origin", "http://evil.example".parse().unwrap());
+    assert!(connect_async(req).await.is_err(), "handshake refused");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signature_for_another_url_is_refused() {
+    let r = rig().await;
+    let (mut ws, challenge) = connect(&r).await;
+    let e = EventBuilder::new(Kind::Authentication, "")
+        .tags([
+            Tag::custom("challenge", [challenge.as_str()]),
+            Tag::custom("relay", ["ws://some-other-service"]),
+        ])
+        .finalize(&r.keys)
+        .unwrap();
+    let event: Value = serde_json::from_str(&e.as_json()).unwrap();
+    send(&mut ws, json!({"v":1,"type":"auth","event":event})).await;
+    assert_eq!(recv_event(&mut ws).await.unwrap()["code"], "unauthorised");
 }

@@ -102,8 +102,8 @@ impl Bridge {
                     let bridge = self.clone();
                     let shutdown = shutdown.clone();
                     tokio::spawn(async move {
+                        let _slot = Slot(bridge.clone());
                         bridge.connection(stream, peer, shutdown).await;
-                        bridge.open.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
                 _ = shutdown.changed() => {
@@ -135,7 +135,10 @@ impl Bridge {
             id,
         };
         if let Err(why) = self.session(stream, id, shutdown).await {
-            eprintln!("visiontouch-bridge: connection {id} from {peer} closed: {why}");
+            eprintln!(
+                "visiontouch-bridge: connection {id} from {peer} closed: {}",
+                for_log(&why)
+            );
         }
     }
 
@@ -152,12 +155,13 @@ impl Bridge {
         #[allow(clippy::result_large_err)]
         let check_origin =
             move |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
-                if origins.is_empty() {
+                // No Origin header: not a browser. Otherwise the page must be listed,
+                // so a web page the operator did not choose cannot drive the arm.
+                let Some(origin) = req.headers().get("origin") else {
                     return Ok(resp);
-                }
-                let origin = req.headers().get("origin").and_then(|v| v.to_str().ok());
-                match origin {
-                    Some(o) if origins.iter().any(|a| a == o) => Ok(resp),
+                };
+                match origin.to_str() {
+                    Ok(o) if origins.iter().any(|a| a == o) => Ok(resp),
                     _ => {
                         let mut r = ErrorResponse::new(Some("origin not allowed".into()));
                         *r.status_mut() = StatusCode::FORBIDDEN;
@@ -345,6 +349,23 @@ impl Bridge {
             }
         }
     }
+}
+
+/// Frees a connection slot when its task ends, however it ends.
+struct Slot(Arc<Bridge>);
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.open.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Client-supplied text made safe for one log line: escaped and truncated.
+fn for_log(s: &str) -> String {
+    let mut out: String = s.chars().take(200).flat_map(char::escape_debug).collect();
+    if s.chars().count() > 200 {
+        out.push('…');
+    }
+    out
 }
 
 /// Releases control when a connection ends, however it ends.
