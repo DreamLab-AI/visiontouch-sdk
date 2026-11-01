@@ -1,0 +1,32 @@
+[package]
+name = "visionclaw-bridge"
+version = "0.1.0"
+description = "Demo app: network WebSocket bridge for VisionClaw (haptic arm + SpaceMouse input)"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "visionclaw_bridge"
+
+[[bin]]
+name = "visionclaw-bridge"
+path = "src/main.rs"
+
+[dependencies]
+visiontouch-device = { path = "../../crates/device" }
+spnav-client = { path = "../spnav-client" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+nostr = { version = "0.45", default-features = false, features = ["std"] }
+getrandom = "0.3"
+
+[dev-dependencies]
+nostr = { version = "0.45", default-features = false, features = ["std", "rand", "os-rng"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake", "connect"] }

@@ -1,0 +1,42 @@
+# visionclaw-bridge configuration. Copy, then set `bind`, `url` and `authorised_keys`.
+
+# This machine's LAN (or loopback) address. Wildcard and public addresses are refused
+# unless allow_public = true.
+bind = "127.0.0.1:7341"
+# The URL clients connect to; they must name it in the signed `relay` tag. Required.
+url = "ws://127.0.0.1:7341"
+# Nostr keys (hex or npub) allowed to control the arm. Required.
+authorised_keys = ["<hex-or-npub>"]
+# A gate for browser clients only: a browser page whose Origin is not listed is refused.
+# A native client sends no Origin and is authenticated by the signed challenge alone.
+# allowed_origins = ["http://desktop.lan:3001"]
+# device = "/dev/parport0"
+
+[coupling]
+stiffness_n_mm = 0.4       # at most 1.0 N/mm
+damping_n_s_m = 1.0
+damping_cap_n = 0.5
+force_cap_n = 1.41         # at most the unit's 5.3 N peak
+workspace_radius_m = 0.12
+target_max_speed_m_s = 0.25
+target_tau_ms = 30
+ramp_ms = 250
+force_rate_n_s = 20        # largest force change per second while engaged (5..=200)
+
+[link]
+target_timeout_ms = 200    # 50..=250
+idle_timeout_ms = 1000
+auth_timeout_ms = 5000
+status_hz = 60
+
+# Optional: steer the client's viewport with a SpaceMouse plugged into this machine,
+# read through spacenavd (the Linux driver). With spacenavd absent or no device attached
+# the bridge sends no navigation, keeps running, and reports why in `nav_ok` and `status`.
+[spacemouse]
+enabled = false
+socket = "/var/run/spnav.sock"     # spacenavd's socket
+deadzone = 0.05            # fraction of deflection_max (0..=0.9); 0 leaves the client's own deadzone
+sensitivity = [1, 1, 1, 1, 1, 1]   # x y z rx ry rz; magnitude 0.01..=10, a negative sign inverts
+deflection_max = 350        # spacenavd count that maps to 1.0 (1..=1000000); tune to your spacenavd sensitivity
+rate_hz = 60               # nav frames per second while the input is non-zero (10..=120)
+poll_ms = 1000             # reconnect interval while spacenavd is absent (200..=10000)

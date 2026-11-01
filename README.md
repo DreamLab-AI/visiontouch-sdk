@@ -20,6 +20,10 @@ from observation and measurement, largely through agentic engineering.
 | `visiontouch-device` | The SDK: encoder state and unwrapping, reset-pose registration, kinematics, a force guard with expiry and limits, and `unit`, the single-unit profile most projects should use |
 | `visiontouch-effects` | Hardware-free force models (cube, plane, water, balloon, springs, viscous field, detents) for building haptic scenes |
 
+The SDK is these three crates. `apps/` holds a demo built beside them, which is not part
+of the SDK, is never published, and which none of them depend on: see
+[Demo: network bridge for VisionClaw](#demo-network-bridge-for-visionclaw-haptic-arm--spacemouse-input).
+
 ## Requirements
 
 - Linux with the `parport_pc` and `ppdev` kernel modules loaded, and the arm on
@@ -127,6 +131,107 @@ digital kitchen scale.
 - On this loop, a virtual wall is stable at about 2 N/mm and bounces at 5 N/mm and
   above.
 
+## Demo: network bridge for VisionClaw (haptic arm + SpaceMouse input)
+
+A demo app beside the SDK (`apps/visionclaw-bridge`, `publish = false`), not an SDK
+crate. It is a headless service, with no display and no TTY. `visionclaw-bridge` runs on the machine the arm is plugged into and serves it to one
+client over a WebSocket, for example a browser application on another desktop. **The
+servo loop never crosses the network.** The bridge runs `Unit` on its own thread at
+about 400 Hz. The client sends a *target* (where the thing it holds is) at 20 to 30 Hz;
+the bridge pulls the pen towards it with a local virtual coupling,
+`F = -k·(pen − target) − c·(v_pen − v_target)`, from the pen it has just measured, and
+streams back the pen pose, the button, the arm state and the heat budget.
+
+```sh
+cp apps/visionclaw-bridge/bridge.example.toml bridge.toml   # set bind, url, authorised_keys
+cargo run -p visionclaw-bridge -- --config bridge.toml          # the arm
+cargo run -p visionclaw-bridge -- --config bridge.toml --fake   # a simulated arm
+```
+
+With the arm, rest the pen in its seat and click the button once to register. Output
+stays off until an authenticated client sends `arm`, and then flows only while the pen
+button is held, after it has been seen released.
+
+| | |
+|---|---|
+| Schema | Versioned JSON text frames (`"v": 1`): `auth`, `arm`, `disarm`, `target` in; `hello`, `auth_ok`, `status`, `error` out. Navigation adds `nav_subscribe` and `nav_unsubscribe` in, `nav_ok` and `nav` out, and nothing else changes. Documented in the crate's `protocol` module |
+| Authentication | The bridge sends a random challenge; the client answers with a Nostr event of kind 22242 (NIP-42) naming the bridge's `url`, signed by a key in `authorised_keys`. One controller at a time |
+| Network | Binds to a loopback or LAN address and accepts LAN peers only, unless `allow_public = true`. `allowed_origins` is only a gate for browser clients: a page whose `Origin` is not listed is refused. A native client sends no `Origin`, is not subject to it, and is authenticated by the signed challenge alone. Plain `ws://`: the link must be trusted, and a page served over `https` needs a TLS proxy in front |
+| Fail-safe | Force stops on the next servo tick when the socket closes, when a malformed message arrives (the connection is also closed), when no message arrives within the idle timeout, or when no target arrives within the target timeout (default 200 ms). Zero goes out before the next service, and a servo stall over 10 ms also cuts force and needs a fresh button release. The SDK's 25 ms stale-output rule stays underneath |
+| Limits | Stiffness at most 1 N/mm (half the stable 2 N/mm; default 0.4), force capped at the 1.41 N continuous level by default (configurable to the peak), and the heat budget on top. Force ramps in from zero when it engages, with the anchor starting at the pen, and while engaged it changes by at most 20 N/s (`force_rate_n_s`), so no target motion can step it; cutting force is immediate |
+| Targets | Metres in the model frame, or in the client's scene with a `view` transform (`origin`, unit-quaternion `rotation`, `scale` in scene units per metre) that places the pen's workspace in that scene. The bridge maps scene targets through the view, reports the pen in scene coordinates too, clamps targets to a sphere about the origin and smooths them with a slew limit and a low-pass. A moving view moves the target, so the hand feels scene motion |
+
+The design and its trade-offs are recorded in
+[docs/adr/0001-network-bridge.md](docs/adr/0001-network-bridge.md).
+
+### Running it as a service
+
+The bridge needs no display server, no desktop session and no terminal. It reads its
+configuration file, listens on one socket, and stops cleanly on `SIGTERM` or `SIGINT`
+(force goes to zero first). A unit with no TTY and no display:
+
+```ini
+# /etc/systemd/system/visionclaw-bridge.service
+[Unit]
+Description=VisionClaw haptic bridge (headless)
+# spacenavd is optional: the bridge runs without it and picks it up when it appears.
+Wants=network-online.target spacenavd.service
+After=network-online.target spacenavd.service
+
+[Service]
+Type=simple
+User=haptics
+Group=haptics
+SupplementaryGroups=lp
+ExecStart=/usr/local/bin/visionclaw-bridge --config /etc/visionclaw/bridge.toml
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=2
+# A stopped service sends SIGTERM; the bridge cuts force and exits.
+KillSignal=SIGTERM
+TimeoutStopSec=5
+# No display variables; the bridge never reads them.
+UnsetEnvironment=DISPLAY WAYLAND_DISPLAY XAUTHORITY
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Adjust `SupplementaryGroups` to whichever group owns `/dev/parport0` on the machine, and
+`User` to a non-login account. The unit lists no `Requires=` on spacenavd on purpose:
+with spacenavd stopped or no SpaceMouse attached the bridge keeps serving the arm, sends
+no navigation, and reports the reason.
+
+### SpaceMouse navigation
+
+A SpaceMouse plugged into the same machine can steer the client's viewport over the same
+socket. The bridge does not read the device itself: it uses the Linux driver, **spacenavd**
+(the 3Dconnexion driver of the FreeSpacenav project, packaged as `spacenavd`), as a
+client of its Unix socket, `/var/run/spnav.sock`. The `spnav-client` crate in `apps/`
+implements that protocol in Rust (no libspnav, no browser HID). Install and start
+spacenavd, then set `[spacemouse] enabled = true` in the bridge configuration; the user
+the bridge runs as needs access to the socket.
+
+| | |
+|---|---|
+| Opt in | An authenticated controller sends `{"v":1,"type":"nav_subscribe"}` and gets `{"type":"nav_ok","enabled":…,"hz":60,"present":…,"reason":…}`. A client that never sends it sees no new message, so v1 clients are unaffected. Frames go to the controller only; an unauthenticated or `busy` connection gets nothing |
+| Frame | `{"v":1,"type":"nav","seq":n,"t":ms,"tx":…,"ty":…,"tz":…,"rx":…,"ry":…,"rz":…,"buttons":mask,"present":bool}`: axes in `[-1, 1]` after deadzone and per-axis sensitivity, in the device's own signs; `t` is monotonic bridge milliseconds (compare frames with each other); `present` says whether a device is attached |
+| Status | Once subscribed, `status` messages also carry `nav_input`: `null` while input is available, otherwise `spacenavd_absent`, `spacenavd_lost` or `no_device`. `nav_ok.reason` says the same at subscribe time. The bridge merges it in the session, not the servo thread |
+| Rate | At most `rate_hz` (default 60) while any axis is non-zero, refreshed every frame so a client can treat a gap as a release; one all-zero frame on release, one on plug and one on unplug (each with the new `present`, so hot-plug is visible in the stream); one frame per button change; nothing while still |
+| No daemon or device | Not an error. The bridge keeps retrying the socket every `poll_ms`, sends no frames, and `nav_ok.present` is `false` with a `reason` until input is available. spacenavd stopping or a device being unplugged mid-deflection ends in a zero frame with `present:false`; it coming back sends a zero frame with `present:true`. With a protocol-0 (old) spacenavd, which reports no device changes, `present` means only that the daemon is up |
+| Force | Navigation never reaches the servo thread, the inbox, the gate or the coupling. A deflected SpaceMouse cannot step force; a view the client steers with it is bounded by the same anchor slew, force-rate and cap limits as any other view motion |
+
+`deflection_max` is the spacenavd count that maps to full deflection. spacenavd does not
+normalise, so tune it to the daemon's own sensitivity setting. The tests use a fake
+spacenavd on a temporary Unix socket and open no device. The design is in
+[docs/adr/0002-spacemouse-navigation.md](docs/adr/0002-spacemouse-navigation.md).
+
 ## Lower-level API
 
 Most projects only need `unit`. Underneath it:
@@ -164,8 +269,8 @@ The arm pushes on a hand with up to about 6 N.
 
 ```sh
 cargo build
-cargo test        # no hardware needed; nothing in the tests opens the port
-cargo clippy --all-targets -- -D warnings
+cargo test --workspace        # no hardware needed; nothing in the tests opens the port
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ## Provenance
