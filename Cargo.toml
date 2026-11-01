@@ -1,0 +1,8 @@
+[workspace]
+members = ["crates/hal", "crates/device", "crates/effects"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+publish = false
