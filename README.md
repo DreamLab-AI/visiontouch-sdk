@@ -35,7 +35,16 @@ visiontouch-device = { git = "https://github.com/DreamLab-AI/visiontouch-sdk" }
 ```
 
 The repository is private, so the machine needs GitHub access (for example
-`gh auth setup-git`). A local checkout works too:
+`gh auth setup-git`), and Cargo must fetch through the git command line so it uses those
+credentials. Add this to the project's `.cargo/config.toml`, or set
+`CARGO_NET_GIT_FETCH_WITH_CLI=true`:
+
+```toml
+[net]
+git-fetch-with-cli = true
+```
+
+A local checkout works too:
 `visiontouch-device = { path = "../visiontouch-sdk/crates/device" }`.
 
 ## Quick start
