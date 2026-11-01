@@ -157,6 +157,23 @@ fn a_daemon_that_dies_mid_stream_zeroes_the_state_and_a_reconnect_resumes() {
 }
 
 #[test]
+fn a_dropped_connection_is_reported_lost_with_zero_input_until_the_retry() {
+    let d = FakeDaemon::start();
+    let m = Monitor::spawn(d.path(), Duration::from_millis(600)).unwrap();
+    let l = m.latest();
+    wait("ready", &l, |s| s.health == Health::Ready);
+    d.push_translation(350, 0, 0);
+    d.push_buttons(1);
+    wait("deflected", &l, |s| s.axes[0] == 350 && s.buttons == 1);
+    d.disconnect_client();
+    wait("lost, zeroed", &l, |s| {
+        s.health == Health::DaemonLost && s.axes == [0; 6] && s.buttons == 0
+    });
+    assert_eq!(l.get().health.reason(), Some("spacenavd_lost"));
+    wait("retried", &l, |s| s.health == Health::Ready);
+}
+
+#[test]
 fn a_halted_daemon_is_reported_lost_then_absent() {
     let mut d = FakeDaemon::start();
     let m = monitor(&d);
