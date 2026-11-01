@@ -8,8 +8,9 @@ command force in real newtons, up to about 5.3 N, with a heat budget that protec
 motors.
 
 This SDK is built for **one specific, lawfully owned unit**. It uses that unit's measured
-gain and limits. It is not a general driver for other devices, and it is for use inside
-the lab only.
+gain and limits. It is not a general or supported driver for other devices. It is
+published as a clean-room showcase: a working driver for a 25-year-old device built
+from observation and measurement, largely through agentic engineering.
 
 ## Crates
 
@@ -34,17 +35,7 @@ the lab only.
 visiontouch-device = { git = "https://github.com/DreamLab-AI/visiontouch-sdk" }
 ```
 
-The repository is private, so the machine needs GitHub access (for example
-`gh auth setup-git`), and Cargo must fetch through the git command line so it uses those
-credentials. Add this to the project's `.cargo/config.toml`, or set
-`CARGO_NET_GIT_FETCH_WITH_CLI=true`:
-
-```toml
-[net]
-git-fetch-with-cli = true
-```
-
-A local checkout works too:
+A local checkout also works:
 `visiontouch-device = { path = "../visiontouch-sdk/crates/device" }`.
 
 ## Quick start
@@ -177,11 +168,29 @@ cargo test        # no hardware needed; nothing in the tests opens the port
 cargo clippy --all-targets -- -D warnings
 ```
 
-## Provenance and use
+## Provenance
 
 This SDK was written independently. Its sources were observation of the device's own
 port traffic and behaviour, published literature about this device family, and attended
 measurements of this unit. It contains no vendor code, firmware, headers or documents,
 and nothing derived from decompilation. It is not affiliated with or endorsed by the
-original manufacturer or its successors. No licence is granted: it is for use within the
-lab only.
+original manufacturer or its successors; product names belong to their owners and are
+used only to identify the hardware.
+
+Contributions must keep it that way: please do not add anything taken from vendor
+software, documentation or reverse-engineered binaries.
+
+## Licence
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)), or
+- MIT licence ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this work, as defined in the Apache-2.0 licence, shall be
+dual licensed as above, without any additional terms or conditions.
+
+The software drives a motorised device that pushes on a hand. It is provided as is,
+without warranty of any kind; see the licence texts. Use it with a deadman and the
+amplifier power switch within reach.
