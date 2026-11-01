@@ -86,8 +86,14 @@ the other crates are unchanged.
   the coupling and its caps allow, and a network fault can only remove force.
 - What the hand feels is the spring between the pen and the client's target. A client
   that wants the user to feel its simulation must let that simulation move the target
-  away from the pen; a target that simply copies the pen yields only a light drag
-  proportional to the round-trip delay.
+  away from the pen. A target that copies the pen through a delay `τ` yields a drag of
+  about `k·v·τ`, and that is not light: at the default 0.4 N/mm with `τ` = 100–200 ms it
+  reaches the 1.41 N cap at 2 to 4 cm/s of hand speed. (A pure delay is dissipative
+  below `1/(2τ)` and adds energy above it.) Such a client must compensate the delay
+  (send the simulation's offset from the hand position it answers to, added to the
+  current pen) or run a much lower stiffness. A target mode in which the bridge itself
+  adds a client-sent offset to the pen it has just measured would remove the residual
+  link delay; it is a candidate for schema version 2.
 - Transport is plain `ws://` and authentication covers the connection, not each
   message, so the LAN segment must be trusted: an attacker able to hijack the TCP
   stream after authentication could send targets (still bounded by the caps and the
