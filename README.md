@@ -19,7 +19,8 @@ from observation and measurement, largely through agentic engineering.
 | `visiontouch-hal` | Linux ppdev transport: software EPP cycles, 16-byte input packets, 8-byte motor packets with acknowledgement, the zero-only arming handshake, a transport clamp on every motor channel |
 | `visiontouch-device` | The SDK: encoder state and unwrapping, reset-pose registration, kinematics, a force guard with expiry and limits, and `unit`, the single-unit profile most projects should use |
 | `visiontouch-effects` | Hardware-free force models (cube, plane, water, balloon, springs, viscous field, detents) for building haptic scenes |
-| `visiontouch-bridge` | A WebSocket bridge that serves the arm to one authenticated network client: the client sends a target, the bridge computes the force locally |
+| `visiontouch-bridge` | A WebSocket bridge that serves the arm to one authenticated network client: the client sends a target, the bridge computes the force locally. It can also relay a USB SpaceMouse for navigation |
+| `visiontouch-spacemouse` | Direct hidraw reader for USB 3Dconnexion SpaceMouse devices (Compact, Wireless, Pro, Enterprise): report decoding, deadzone and sensitivity, hot-plug, no `spacenavd` |
 
 ## Requirements
 
@@ -150,7 +151,7 @@ button is held, after it has been seen released.
 
 | | |
 |---|---|
-| Schema | Versioned JSON text frames (`"v": 1`): `auth`, `arm`, `disarm`, `target` in; `hello`, `auth_ok`, `status`, `error` out. Documented in the crate's `protocol` module |
+| Schema | Versioned JSON text frames (`"v": 1`): `auth`, `arm`, `disarm`, `target` in; `hello`, `auth_ok`, `status`, `error` out. Navigation adds `nav_subscribe` and `nav_unsubscribe` in, `nav_ok` and `nav` out, and nothing else changes. Documented in the crate's `protocol` module |
 | Authentication | The bridge sends a random challenge; the client answers with a Nostr event of kind 22242 (NIP-42) naming the bridge's `url`, signed by a key in `authorised_keys`. One controller at a time |
 | Network | Binds to a loopback or LAN address and accepts LAN peers only, unless `allow_public = true`. A browser page must be listed in `allowed_origins`. Plain `ws://`: the link must be trusted, and a page served over `https` needs a TLS proxy in front |
 | Fail-safe | Force stops on the next servo tick when the socket closes, when a malformed message arrives (the connection is also closed), when no message arrives within the idle timeout, or when no target arrives within the target timeout (default 200 ms). Zero goes out before the next service, and a servo stall over 10 ms also cuts force and needs a fresh button release. The SDK's 25 ms stale-output rule stays underneath |
@@ -159,6 +160,33 @@ button is held, after it has been seen released.
 
 The design and its trade-offs are recorded in
 [docs/adr/0001-network-bridge.md](docs/adr/0001-network-bridge.md).
+
+### SpaceMouse navigation
+
+A USB SpaceMouse (not a SpacePilot) plugged into the same machine can steer the client's
+viewport over the same socket. Set `[spacemouse] enabled = true` in the bridge
+configuration. The `visiontouch-spacemouse` crate reads `/dev/hidrawN` directly, so no
+`spacenavd` is needed; it needs read access to the node, for example with a udev rule
+such as
+
+```text
+# /etc/udev/rules.d/70-spacemouse.rules
+KERNEL=="hidraw*", ATTRS{idVendor}=="256f", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c62b", MODE="0660", TAG+="uaccess"
+```
+
+| | |
+|---|---|
+| Opt in | An authenticated controller sends `{"v":1,"type":"nav_subscribe"}` and gets `{"type":"nav_ok","enabled":…,"hz":60,"present":…}`. A client that never sends it sees no new message, so v1 clients are unaffected. Frames go to the controller only; an unauthenticated or `busy` connection gets nothing |
+| Frame | `{"v":1,"type":"nav","seq":n,"t":ms,"tx":…,"ty":…,"tz":…,"rx":…,"ry":…,"rz":…,"buttons":mask,"present":bool}`: axes in `[-1, 1]` after deadzone and per-axis sensitivity, in the device's own signs; `t` is monotonic bridge milliseconds (compare frames with each other); `present` says whether a device is attached |
+| Rate | At most `rate_hz` (default 60) while any axis is non-zero, refreshed every frame so a client can treat a gap as a release; one all-zero frame on release, one on plug and one on unplug (each with the new `present`, so hot-plug is visible in the stream); one frame per button change; nothing while still |
+| No device | Not an error. The bridge keeps polling for one, sends no frames, and `nav_ok.present` is `false` until one is attached. A device that goes away mid-deflection ends in a zero frame with `present:false`; plugging one in sends a zero frame with `present:true` |
+| Force | Navigation never reaches the servo thread, the inbox, the gate or the coupling. A deflected SpaceMouse cannot step force; a view the client steers with it is bounded by the same anchor slew, force-rate and cap limits as any other view motion |
+
+Run `cargo run -p visiontouch-spacemouse --example record` by hand on the machine with
+the device to dump real reports and check the decoder (it opens the real hidraw node;
+nothing in `cargo test` does). The design is in
+[docs/adr/0002-spacemouse-navigation.md](docs/adr/0002-spacemouse-navigation.md).
 
 ## Lower-level API
 

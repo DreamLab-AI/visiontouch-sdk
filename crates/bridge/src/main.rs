@@ -18,6 +18,8 @@ use visiontouch_bridge::server::Bridge;
 use visiontouch_bridge::servo::{self, Haptic, Inbox, SERVO_PERIOD, Servo};
 use visiontouch_device::shutdown;
 use visiontouch_device::unit::Unit;
+use visiontouch_spacemouse::device::HidrawOpener;
+use visiontouch_spacemouse::monitor::Monitor;
 
 const USAGE: &str = "usage: visiontouch-bridge --config <file.toml> [--fake]";
 
@@ -116,7 +118,31 @@ fn serve<H: Haptic + Send + 'static>(unit: H, config: Config) -> Result<H, Strin
     .map_err(|e| format!("servo thread: {e}"))?;
 
     let bind = config.bind;
-    let bridge = Bridge::new(config, inbox, status_rx.clone())?;
+    // SpaceMouse navigation is optional and fails soft: its monitor thread has no link
+    // to the servo thread or the shutdown watcher below, and no device just means no
+    // navigation frames. The monitor must outlive the server.
+    let mouse = if config.spacemouse.enabled {
+        let opener = Box::new(HidrawOpener::system());
+        match Monitor::spawn(
+            opener,
+            config.spacemouse.settings(),
+            Duration::from_millis(config.spacemouse.poll_ms),
+        ) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("visiontouch-bridge: spacemouse disabled: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let bridge = Bridge::with_nav(
+        config,
+        inbox,
+        status_rx.clone(),
+        mouse.as_ref().map(Monitor::latest),
+    )?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -142,6 +168,7 @@ fn serve<H: Haptic + Send + 'static>(unit: H, config: Config) -> Result<H, Strin
         });
         bridge.serve(listener, shutdown_rx).await
     });
+    drop(mouse);
     stop.store(true, Ordering::Relaxed);
     let (unit, ended) = servo_thread
         .join()

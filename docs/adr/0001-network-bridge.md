@@ -13,6 +13,9 @@ review_trigger: the first attended session with the arm on the bridge, any chang
 
 # ADR-0001: Serve the arm over a WebSocket with a local virtual coupling
 
+SpaceMouse navigation over the same socket is a separate, additive decision:
+[ADR-0002](0002-spacemouse-navigation.md).
+
 This is the first decision record in this repository; it starts `docs/adr/`.
 
 ## Context

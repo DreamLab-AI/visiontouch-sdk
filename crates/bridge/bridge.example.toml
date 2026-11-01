@@ -28,3 +28,14 @@ target_timeout_ms = 200    # 50..=250
 idle_timeout_ms = 1000
 auth_timeout_ms = 5000
 status_hz = 60
+
+# Optional: steer the client's viewport with a USB SpaceMouse plugged into this machine.
+# Needs read access to /dev/hidrawN (see the README's udev rule). With no device attached
+# the bridge simply sends no navigation.
+[spacemouse]
+enabled = false
+deadzone = 0.05            # fraction of full scale (0..=0.9); 0 leaves the client's own deadzone
+sensitivity = [1, 1, 1, 1, 1, 1]   # x y z rx ry rz; magnitude 0.01..=10, a negative sign inverts
+full_scale = 350           # raw count of full deflection (1..=32767)
+rate_hz = 60               # nav frames per second while the input is non-zero (10..=120)
+poll_ms = 1000             # device scan interval while none is attached (200..=10000)

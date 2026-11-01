@@ -24,6 +24,14 @@
 //! idle_timeout_ms = 1000
 //! auth_timeout_ms = 5000
 //! status_hz = 60
+//!
+//! [spacemouse]                      # optional USB SpaceMouse navigation; see `nav`
+//! enabled = false
+//! deadzone = 0.05                   # fraction of full scale, 0..=0.9
+//! sensitivity = [1, 1, 1, 1, 1, 1]  # x y z rx ry rz; magnitude 0.01..=10, negative inverts
+//! full_scale = 350                  # raw count of full deflection, 1..=32767
+//! rate_hz = 60                      # nav frames per second, 10..=120
+//! poll_ms = 1000                    # device scan interval while none is attached
 //! ```
 use crate::auth::AuthPolicy;
 use crate::coupling::{Coupling, TargetFilter};
@@ -34,6 +42,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 use visiontouch_device::unit::{CONTINUOUS_N, PEAK_N, STABLE_STIFFNESS_N_MM};
+use visiontouch_spacemouse::filter::Settings;
 
 /// Highest coupling stiffness the bridge accepts, N/mm: half the unit's stable figure.
 ///
@@ -116,6 +125,52 @@ impl Default for LinkConfig {
     }
 }
 
+/// The `[spacemouse]` section: optional navigation from a USB SpaceMouse plugged into
+/// this machine. Disabled unless `enabled = true`; an enabled bridge with no device
+/// attached simply sends no navigation.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct SpacemouseConfig {
+    /// Read a SpaceMouse and offer navigation to subscribed clients.
+    pub enabled: bool,
+    /// Deadzone as a fraction of full scale, in `[0, 0.9]`.
+    pub deadzone: f64,
+    /// Per-axis multiplier `x, y, z, rx, ry, rz`; magnitude in `[0.01, 10]`, a negative
+    /// sign inverts the axis.
+    pub sensitivity: [f64; 6],
+    /// The raw count that counts as full deflection, in `[1, 32767]`.
+    pub full_scale: f64,
+    /// Navigation frames per second while the input is non-zero, in `[10, 120]`.
+    pub rate_hz: u32,
+    /// Milliseconds between device scans while none is attached, in `[200, 10000]`.
+    pub poll_ms: u64,
+}
+
+impl Default for SpacemouseConfig {
+    fn default() -> Self {
+        let s = Settings::default();
+        Self {
+            enabled: false,
+            deadzone: s.deadzone,
+            sensitivity: s.sensitivity,
+            full_scale: s.full_scale,
+            rate_hz: 60,
+            poll_ms: 1000,
+        }
+    }
+}
+
+impl SpacemouseConfig {
+    /// The filter settings.
+    pub fn settings(&self) -> Settings {
+        Settings {
+            deadzone: self.deadzone,
+            sensitivity: self.sensitivity,
+            full_scale: self.full_scale,
+        }
+    }
+}
+
 /// The whole configuration file.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -146,6 +201,9 @@ pub struct Config {
     /// Link timeouts and rates.
     #[serde(default)]
     pub link: LinkConfig,
+    /// Optional SpaceMouse navigation.
+    #[serde(default)]
+    pub spacemouse: SpacemouseConfig,
 }
 
 fn default_bind() -> SocketAddr {
@@ -215,6 +273,12 @@ impl Config {
             false,
         )?;
         range("status_hz", l.status_hz as f64, 1., 200., false)?;
+        let m = &self.spacemouse;
+        m.settings()
+            .validate()
+            .map_err(|e| format!("spacemouse: {e}"))?;
+        range("rate_hz", f64::from(m.rate_hz), 10., 120., false)?;
+        range("poll_ms", m.poll_ms as f64, 200., 10_000., false)?;
         netpolicy::check_bind(self.bind, self.allow_public)?;
         self.auth_policy()?;
         Ok(())
@@ -389,5 +453,33 @@ mod tests {
             Config::from_toml(&t).is_err(),
             "typo is not silently ignored"
         );
+    }
+
+    #[test]
+    fn spacemouse_is_off_by_default_and_its_limits_are_checked() {
+        let c = Config::from_toml(&minimal()).unwrap();
+        assert!(!c.spacemouse.enabled);
+        assert_eq!(c.spacemouse.rate_hz, 60);
+        for bad in [
+            "deadzone = 0.95",
+            "deadzone = -0.1",
+            "sensitivity = [1, 1, 1, 1, 1, 0]",
+            "sensitivity = [1, 1, 1, 1, 1, 11]",
+            "full_scale = 0",
+            "rate_hz = 9",
+            "rate_hz = 121",
+            "poll_ms = 100",
+            "unknown = 1",
+        ] {
+            let text = format!("{}\n[spacemouse]\n{bad}\n", minimal());
+            assert!(Config::from_toml(&text).is_err(), "accepted: {bad}");
+        }
+        let text = format!(
+            "{}\n[spacemouse]\nenabled = true\nsensitivity = [1, -1, 1, 0.5, 0.5, 2]\n",
+            minimal()
+        );
+        let c = Config::from_toml(&text).unwrap();
+        assert!(c.spacemouse.enabled);
+        assert_eq!(c.spacemouse.settings().sensitivity[1], -1.);
     }
 }

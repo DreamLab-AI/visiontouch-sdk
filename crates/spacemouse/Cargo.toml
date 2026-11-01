@@ -1,0 +1,15 @@
+[package]
+name = "visiontouch-spacemouse"
+version = "0.1.0"
+description = "Direct hidraw reader for USB 3Dconnexion SpaceMouse devices: report decoding, deadzone and sensitivity, hot-plug, no spacenavd"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "visiontouch_spacemouse"
+
+[dependencies]
+libc = "0.2"

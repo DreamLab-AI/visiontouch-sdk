@@ -19,6 +19,9 @@
 //! | `disarm` | — | Turn force off |
 //! | `target` | `seq`: integer, `p`: `[x, y, z]` or `null`, optional `view` | The anchor for the coupling; `null` means nothing is held. Without `view`, `p` is in the model frame (metres). With `view` (`{"origin": [x, y, z], "rotation": [x, y, z, w], "scale": s}`, see [`crate::view`]), `p` is in the client's scene and the bridge maps it; the view is also used to report the pen in scene coordinates. Send at 20–30 Hz while connected, `null` included: it is also the liveness signal |
 //!
+//! | `nav_subscribe` | — | Ask for SpaceMouse navigation frames (controller only). Additive: a v1 client that never sends it never sees a `nav` message. See [`crate::nav`] |
+//! | `nav_unsubscribe` | — | Stop them |
+//!
 //! # Bridge to client
 //!
 //! | `type` | Fields | Meaning |
@@ -27,6 +30,8 @@
 //! | `auth_ok` | `pubkey` | This connection is now the controller |
 //! | `status` | see [`Status`] | Pen pose, button, arm state, gate reason, force and heat, at the configured rate |
 //! | `error` | `code`, `message` | Sent before the bridge closes the connection |
+//! | `nav_ok` | `enabled`, `hz`, `present` | Answer to `nav_subscribe`: whether the bridge offers navigation, the frame rate, and whether a device is attached now |
+//! | `nav` | see [`NavFrame`] | One navigation frame, only after `nav_subscribe`. It carries `present` too, so a plug or unplug after subscribing is seen in the stream |
 //!
 //! ```
 //! use visiontouch_bridge::protocol::{ClientMsg, parse_client};
@@ -57,6 +62,10 @@ pub enum ClientMsg {
     Arm,
     /// Turn force off.
     Disarm,
+    /// Start receiving navigation frames.
+    NavSubscribe,
+    /// Stop receiving navigation frames.
+    NavUnsubscribe,
     /// A new coupling target, or `None` for "nothing held".
     Target {
         /// Client sequence number, echoed in status.
@@ -75,6 +84,8 @@ impl ClientMsg {
             ClientMsg::Auth { .. } => "auth",
             ClientMsg::Arm => "arm",
             ClientMsg::Disarm => "disarm",
+            ClientMsg::NavSubscribe => "nav_subscribe",
+            ClientMsg::NavUnsubscribe => "nav_unsubscribe",
             ClientMsg::Target { .. } => "target",
         }
     }
@@ -172,6 +183,14 @@ pub fn parse_client(text: &str) -> Result<ClientMsg, Malformed> {
             only_fields(obj, &["v", "type"])?;
             Ok(ClientMsg::Disarm)
         }
+        "nav_subscribe" => {
+            only_fields(obj, &["v", "type"])?;
+            Ok(ClientMsg::NavSubscribe)
+        }
+        "nav_unsubscribe" => {
+            only_fields(obj, &["v", "type"])?;
+            Ok(ClientMsg::NavUnsubscribe)
+        }
         "target" => {
             only_fields(obj, &["v", "type", "seq", "p", "view"])?;
             let seq = obj
@@ -250,6 +269,37 @@ pub struct Status {
     pub device_fault: bool,
 }
 
+/// One SpaceMouse navigation frame, sent as `nav`.
+///
+/// Axes are normalised to `[-1, 1]` after the bridge's deadzone and sensitivity, in the
+/// device's own sign convention (the same signs a local USB SpaceMouse reports to the
+/// client's existing driver). `buttons` is the device's button bitmask, bit 0 = button 1.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct NavFrame {
+    /// Frame counter for this subscription, starting at 1.
+    pub seq: u64,
+    /// Monotonic milliseconds since the bridge began serving. Not the clock `status.t_ms`
+    /// uses; compare frames with each other only.
+    pub t: u64,
+    /// Translation x (right).
+    pub tx: f64,
+    /// Translation y.
+    pub ty: f64,
+    /// Translation z.
+    pub tz: f64,
+    /// Rotation about x.
+    pub rx: f64,
+    /// Rotation about y.
+    pub ry: f64,
+    /// Rotation about z.
+    pub rz: f64,
+    /// Button bitmask.
+    pub buttons: u32,
+    /// A device is attached. Every change of this (a plug or an unplug) is sent as an
+    /// all-zero frame, so a client can follow hot-plug from the stream alone.
+    pub present: bool,
+}
+
 /// Error codes sent before a close.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -288,6 +338,18 @@ pub enum ServerMsg {
     },
     /// Servo state.
     Status(Status),
+    /// The answer to `nav_subscribe`.
+    NavOk {
+        /// The bridge has SpaceMouse navigation enabled. When false no `nav` frame will
+        /// ever follow.
+        enabled: bool,
+        /// Frames per second while the input is non-zero (0 when not enabled).
+        hz: u32,
+        /// A device is attached right now. Devices come and go; this is a snapshot.
+        present: bool,
+    },
+    /// One navigation frame.
+    Nav(NavFrame),
     /// Sent before a close.
     Error {
         /// Machine-readable code.
@@ -397,6 +459,59 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn nav_messages_parse_strictly() {
+        assert_eq!(
+            parse_client(r#"{"v":1,"type":"nav_subscribe"}"#),
+            Ok(ClientMsg::NavSubscribe)
+        );
+        assert_eq!(
+            parse_client(r#"{"v":1,"type":"nav_unsubscribe"}"#),
+            Ok(ClientMsg::NavUnsubscribe)
+        );
+        for text in [
+            r#"{"v":1,"type":"nav_subscribe","hz":500}"#,
+            r#"{"v":2,"type":"nav_subscribe"}"#,
+            r#"{"type":"nav_subscribe"}"#,
+        ] {
+            assert!(parse_client(text).is_err(), "accepted: {text}");
+        }
+    }
+
+    #[test]
+    fn nav_frames_serialise_flat_with_the_version() {
+        let f = NavFrame {
+            seq: 3,
+            t: 1200,
+            tx: 0.5,
+            ty: 0.,
+            tz: -1.,
+            rx: 0.,
+            ry: 0.25,
+            rz: 0.,
+            buttons: 2,
+            present: true,
+        };
+        let v: Value = serde_json::from_str(&ServerMsg::Nav(f).to_text()).unwrap();
+        assert_eq!(v["v"], 1);
+        assert_eq!(v["type"], "nav");
+        assert_eq!(v["seq"], 3);
+        assert_eq!(v["tz"], -1.0);
+        assert_eq!(v["buttons"], 2);
+        assert_eq!(v["present"], true);
+        let ok: Value = serde_json::from_str(
+            &ServerMsg::NavOk {
+                enabled: true,
+                hz: 60,
+                present: false,
+            }
+            .to_text(),
+        )
+        .unwrap();
+        assert_eq!(ok["type"], "nav_ok");
+        assert_eq!(ok["present"], false);
     }
 
     #[test]

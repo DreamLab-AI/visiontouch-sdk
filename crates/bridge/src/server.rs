@@ -15,10 +15,16 @@
 //!    silence longer than the idle timeout releases control (force stops on the next
 //!    servo tick) and closes the connection. A disconnect does the same.
 //!
+//! Navigation (see [`crate::nav`]) is a side channel on the same session: after
+//! `nav_subscribe` from the controller, the session also sends `nav` frames at the
+//! configured rate. It reads a [`Latest`] handle and writes only to this socket; it
+//! never touches the [`SharedInbox`].
+//!
 //! Release happens in a drop guard, so every exit path, including a panic in the
 //! connection task, stops force.
 use crate::auth::{self, AuthPolicy};
 use crate::config::Config;
+use crate::nav::NavStream;
 use crate::netpolicy;
 use crate::protocol::{ClientMsg, ErrorCode, ServerMsg, Status, parse_client};
 use crate::servo::{SharedInbox, Target};
@@ -37,6 +43,7 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use visiontouch_spacemouse::monitor::Latest;
 
 /// Largest accepted WebSocket message or frame, bytes.
 pub const MAX_MESSAGE_BYTES: usize = 8 * 1024;
@@ -51,6 +58,8 @@ pub struct Bridge {
     policy: AuthPolicy,
     inbox: SharedInbox,
     status: watch::Receiver<Status>,
+    nav: Option<Latest>,
+    started: Instant,
     next_id: AtomicU64,
     open: AtomicUsize,
 }
@@ -62,13 +71,27 @@ impl Bridge {
         inbox: SharedInbox,
         status: watch::Receiver<Status>,
     ) -> Result<Arc<Self>, String> {
+        Self::with_nav(config, inbox, status, None)
+    }
+
+    /// As [`Bridge::new`], with an optional SpaceMouse state handle. Navigation is
+    /// offered only when `nav` is `Some` and `[spacemouse] enabled` is true.
+    pub fn with_nav(
+        config: Config,
+        inbox: SharedInbox,
+        status: watch::Receiver<Status>,
+        nav: Option<Latest>,
+    ) -> Result<Arc<Self>, String> {
         config.validate()?;
         let policy = config.auth_policy()?;
+        let config_enabled = config.spacemouse.enabled;
         Ok(Arc::new(Self {
             config,
             policy,
             inbox,
             status,
+            nav: nav.filter(|_| config_enabled),
+            started: Instant::now(),
             next_id: AtomicU64::new(1),
             open: AtomicUsize::new(0),
         }))
@@ -282,6 +305,10 @@ impl Bridge {
         let mut ticker =
             tokio::time::interval(Duration::from_secs_f64(1. / f64::from(link.status_hz)));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let nav_hz = self.config.spacemouse.rate_hz;
+        let mut nav_ticker = tokio::time::interval(Duration::from_secs_f64(1. / f64::from(nav_hz)));
+        nav_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut nav_stream: Option<NavStream> = None;
         loop {
             tokio::select! {
                 incoming = next_text(&mut rx) => {
@@ -302,6 +329,7 @@ impl Bridge {
                         }
                     };
                     // Apply under the lock, decide outside it: no guard lives across an await.
+                    let mut nav_reply = false;
                     let refused = {
                         let mut inbox = self.inbox.lock().unwrap_or_else(|e| e.into_inner());
                         if inbox.controller != Some(id) {
@@ -315,6 +343,16 @@ impl Bridge {
                                 }
                                 ClientMsg::Disarm => {
                                     inbox.arm_wanted = false;
+                                    None
+                                }
+                                ClientMsg::NavSubscribe => {
+                                    // Side channel only: no inbox field is written.
+                                    nav_stream = self.nav.as_ref().map(|n| NavStream::new(n.get().present));
+                                    nav_reply = true;
+                                    None
+                                }
+                                ClientMsg::NavUnsubscribe => {
+                                    nav_stream = None;
                                     None
                                 }
                                 ClientMsg::Target { seq, p, view } => {
@@ -338,6 +376,22 @@ impl Bridge {
                     };
                     if let Some((code, why)) = refused {
                         close_with!(code, why.to_string());
+                    }
+                    if nav_reply {
+                        let enabled = self.nav.is_some();
+                        send!(ServerMsg::NavOk {
+                            enabled,
+                            hz: if enabled { nav_hz } else { 0 },
+                            present: self.nav.as_ref().is_some_and(|n| n.get().present),
+                        });
+                    }
+                }
+                _ = nav_ticker.tick(), if nav_stream.is_some() => {
+                    if let (Some(stream), Some(latest)) = (nav_stream.as_mut(), self.nav.as_ref()) {
+                        let t_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        if let Some(frame) = stream.next(&latest.get(), t_ms) {
+                            send!(ServerMsg::Nav(frame));
+                        }
                     }
                 }
                 _ = ticker.tick() => {

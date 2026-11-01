@@ -1183,6 +1183,7 @@ dependencies = [
  "tokio-tungstenite",
  "toml",
  "visiontouch-device",
+ "visiontouch-spacemouse",
 ]
 
 [[package]]
@@ -1203,6 +1204,13 @@ dependencies = [
 [[package]]
 name = "visiontouch-hal"
 version = "0.1.0"
+
+[[package]]
+name = "visiontouch-spacemouse"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "wasi"

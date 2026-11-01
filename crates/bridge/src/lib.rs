@@ -44,6 +44,7 @@
 //! | [`auth`] | Challenge and signature verification |
 //! | [`netpolicy`] | LAN-only bind and peer rules |
 //! | [`config`] | TOML configuration and its limits |
+//! | [`nav`] | Optional SpaceMouse navigation frames; view input only, never the force path |
 //! | [`view`] | The view transform between the pen's workspace and a client's scene |
 //! | [`fake`] | A simulated unit for tests and client development |
 #![warn(missing_docs)]
@@ -52,6 +53,7 @@ pub mod config;
 pub mod coupling;
 pub mod fake;
 pub mod gate;
+pub mod nav;
 pub mod netpolicy;
 pub mod protocol;
 pub mod server;
