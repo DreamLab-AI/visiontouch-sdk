@@ -19,6 +19,7 @@ from observation and measurement, largely through agentic engineering.
 | `visiontouch-hal` | Linux ppdev transport: software EPP cycles, 16-byte input packets, 8-byte motor packets with acknowledgement, the zero-only arming handshake, a transport clamp on every motor channel |
 | `visiontouch-device` | The SDK: encoder state and unwrapping, reset-pose registration, kinematics, a force guard with expiry and limits, and `unit`, the single-unit profile most projects should use |
 | `visiontouch-effects` | Hardware-free force models (cube, plane, water, balloon, springs, viscous field, detents) for building haptic scenes |
+| `visiontouch-bridge` | A WebSocket bridge that serves the arm to one authenticated network client: the client sends a target, the bridge computes the force locally |
 
 ## Requirements
 
@@ -126,6 +127,38 @@ digital kitchen scale.
   figure.
 - On this loop, a virtual wall is stable at about 2 N/mm and bounces at 5 N/mm and
   above.
+
+## Network bridge
+
+`visiontouch-bridge` runs on the machine the arm is plugged into and serves it to one
+client over a WebSocket, for example a browser application on another desktop. **The
+servo loop never crosses the network.** The bridge runs `Unit` on its own thread at
+about 400 Hz. The client sends a *target* (where the thing it holds is) at 20 to 30 Hz;
+the bridge pulls the pen towards it with a local virtual coupling,
+`F = -k·(pen − target) − c·(v_pen − v_target)`, from the pen it has just measured, and
+streams back the pen pose, the button, the arm state and the heat budget.
+
+```sh
+cp crates/bridge/bridge.example.toml bridge.toml   # set bind, url, authorised_keys
+cargo run -p visiontouch-bridge -- --config bridge.toml          # the arm
+cargo run -p visiontouch-bridge -- --config bridge.toml --fake   # a simulated arm
+```
+
+With the arm, rest the pen in its seat and click the button once to register. Output
+stays off until an authenticated client sends `arm`, and then flows only while the pen
+button is held, after it has been seen released.
+
+| | |
+|---|---|
+| Schema | Versioned JSON text frames (`"v": 1`): `auth`, `arm`, `disarm`, `target` in; `hello`, `auth_ok`, `status`, `error` out. Documented in the crate's `protocol` module |
+| Authentication | The bridge sends a random challenge; the client answers with a Nostr event of kind 22242 (NIP-42) signed by a key in `authorised_keys`. One controller at a time |
+| Network | Binds to a loopback or LAN address and accepts LAN peers only, unless `allow_public = true`. Optional browser `Origin` allowlist. Plain `ws://`: a page served over `https` needs a TLS proxy in front |
+| Fail-safe | Force stops on the next servo tick when the socket closes, when a malformed message arrives (the connection is also closed), when no message arrives within the idle timeout, or when no target arrives within the target timeout (default 200 ms). The SDK's 25 ms stale-output rule stays underneath |
+| Limits | Stiffness at most 1 N/mm (half the stable 2 N/mm; default 0.4), force capped at the 1.41 N continuous level by default (configurable to the peak), and the heat budget on top. Force ramps in from zero when it engages, with the anchor starting at the pen |
+| Targets | Metres in the model frame. The client maps its scene to the pen's workspace; the bridge clamps targets to a sphere about the origin and smooths them with a slew limit and a low-pass |
+
+The design and its trade-offs are recorded in
+[docs/adr/0001-network-bridge.md](docs/adr/0001-network-bridge.md).
 
 ## Lower-level API
 

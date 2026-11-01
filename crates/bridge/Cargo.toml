@@ -1,0 +1,31 @@
+[package]
+name = "visiontouch-bridge"
+version = "0.1.0"
+description = "Network WebSocket bridge for the single-unit haptic arm: a local virtual coupling, network-supplied targets, fail-safe on every link failure"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "visiontouch_bridge"
+
+[[bin]]
+name = "visiontouch-bridge"
+path = "src/main.rs"
+
+[dependencies]
+visiontouch-device = { path = "../device" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+nostr = { version = "0.45", default-features = false, features = ["std"] }
+getrandom = "0.3"
+
+[dev-dependencies]
+nostr = { version = "0.45", default-features = false, features = ["std", "rand", "os-rng"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake", "connect"] }

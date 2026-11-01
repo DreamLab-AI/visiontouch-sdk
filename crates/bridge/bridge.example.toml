@@ -1,0 +1,28 @@
+# visiontouch-bridge configuration. Copy, then set `bind`, `url` and `authorised_keys`.
+
+# This machine's LAN (or loopback) address. Wildcard and public addresses are refused
+# unless allow_public = true.
+bind = "127.0.0.1:7341"
+# The URL clients must name in the signed `relay` tag. Optional but recommended.
+# url = "ws://192.168.1.20:7341"
+# Nostr keys (hex or npub) allowed to control the arm. Required.
+authorised_keys = ["<hex-or-npub>"]
+# Browser Origin values allowed to connect; empty allows any.
+# allowed_origins = ["http://desktop.lan:3001"]
+# device = "/dev/parport0"
+
+[coupling]
+stiffness_n_mm = 0.4       # at most 1.0 N/mm
+damping_n_s_m = 1.0
+damping_cap_n = 0.5
+force_cap_n = 1.41         # at most the unit's 5.3 N peak
+workspace_radius_m = 0.12
+target_max_speed_m_s = 0.25
+target_tau_ms = 30
+ramp_ms = 250
+
+[link]
+target_timeout_ms = 200    # 50..=250
+idle_timeout_ms = 1000
+auth_timeout_ms = 5000
+status_hz = 60
