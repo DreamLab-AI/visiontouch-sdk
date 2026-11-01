@@ -164,16 +164,16 @@ mod tests {
 
     #[test]
     fn replies_and_unused_types_are_not_events() {
-        let reply = frame([REQ_TAG | REQ_DEV_NAXES, 6, 0, 0, 0, 0, 0, 0]);
+        let reply = frame([REQ_TAG | REQ_DEV_NAXES, 6, 0, 0, 0, 0, 5, -1]);
         assert_eq!(decode(&reply), None);
         assert_eq!(
             classify(&reply),
             Frame::Reply {
                 kind: REQ_TAG | REQ_DEV_NAXES,
-                status: 0
+                status: -1
             }
         );
-        for kind in [4, 5, 6, 99, -1] {
+        for kind in [4, 5, 6, 99, -1, 0x1000, 0x7fab_2002] {
             assert_eq!(
                 classify(&frame([kind, 0, 0, 0, 0, 0, 0, 0])),
                 Frame::Ignored

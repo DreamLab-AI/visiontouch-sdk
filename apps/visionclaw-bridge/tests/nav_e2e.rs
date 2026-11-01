@@ -230,7 +230,7 @@ async fn an_authenticated_subscriber_gets_bounded_frames_then_one_zero_frame() {
         (json!(true), json!(60))
     );
     wait_until("device read", || {
-        r._monitor.as_ref().unwrap().latest().get().health.present()
+        r._monitor.as_ref().unwrap().latest().get().present
     })
     .await;
 
@@ -286,7 +286,7 @@ async fn an_authenticated_subscriber_gets_bounded_frames_then_one_zero_frame() {
 async fn an_unauthenticated_client_gets_nothing() {
     let r = rig(Nav::Enabled { plugged: true }).await;
     wait_until("device read", || {
-        r._monitor.as_ref().unwrap().latest().get().health.present()
+        r._monitor.as_ref().unwrap().latest().get().present
     })
     .await;
     r.pad.push_translation(350, 350, 350);
@@ -322,7 +322,7 @@ async fn a_v1_client_that_never_subscribes_sees_no_nav_message() {
     let r = rig(Nav::Enabled { plugged: true }).await;
     let mut ws = authed(&r).await;
     wait_until("device read", || {
-        r._monitor.as_ref().unwrap().latest().get().health.present()
+        r._monitor.as_ref().unwrap().latest().get().present
     })
     .await;
     r.pad.push_translation(350, 0, 0);
@@ -340,7 +340,7 @@ async fn a_busy_second_client_gets_no_nav() {
     let mut first = authed(&r).await;
     subscribe(&mut first).await;
     wait_until("device read", || {
-        r._monitor.as_ref().unwrap().latest().get().health.present()
+        r._monitor.as_ref().unwrap().latest().get().present
     })
     .await;
     r.pad.push_translation(350, 0, 0);
@@ -373,7 +373,7 @@ async fn no_device_then_a_device_then_none_again() {
 
     r.pad.plug();
     wait_until("hot-plugged", || {
-        r._monitor.as_ref().unwrap().latest().get().health.present()
+        r._monitor.as_ref().unwrap().latest().get().present
     })
     .await;
     let plugged = pump(&mut ws, Duration::from_millis(200), &mut seq, None).await;
@@ -433,7 +433,7 @@ async fn unsubscribing_stops_the_frames() {
     let mut ws = authed(&r).await;
     subscribe(&mut ws).await;
     wait_until("device read", || {
-        r._monitor.as_ref().unwrap().latest().get().health.present()
+        r._monitor.as_ref().unwrap().latest().get().present
     })
     .await;
     r.pad.push_translation(350, 0, 0);
@@ -493,7 +493,7 @@ async fn navigation_during_a_hold_never_steps_force() {
     let (mut ws, mut seq) = engaged(&r, target).await;
     subscribe(&mut ws).await;
     wait_until("device read", || {
-        r._monitor.as_ref().unwrap().latest().get().health.present()
+        r._monitor.as_ref().unwrap().latest().get().present
     })
     .await;
     let settle = pump(&mut ws, Duration::from_millis(900), &mut seq, Some(target)).await;
@@ -565,7 +565,7 @@ async fn a_view_steered_by_navigation_under_a_hold_stays_within_the_force_limits
     let (mut ws, mut seq) = engaged(&r, [0.002, 0., 0.]).await;
     subscribe(&mut ws).await;
     wait_until("device read", || {
-        r._monitor.as_ref().unwrap().latest().get().health.present()
+        r._monitor.as_ref().unwrap().latest().get().present
     })
     .await;
 

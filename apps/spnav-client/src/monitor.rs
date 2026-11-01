@@ -78,6 +78,8 @@ impl Health {
 /// What the monitor last saw.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
+    /// Input is expected from this link; always `health.present()`.
+    pub present: bool,
     /// Link and device state.
     pub health: Health,
     /// Motion `x, y, z, rx, ry, rz`, in the daemon's units. All zero unless
@@ -110,6 +112,7 @@ impl Latest {
         };
         let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if g.health != health || g.axes != axes || g.buttons != buttons {
+            g.present = health.present();
             g.health = health;
             g.axes = axes;
             g.buttons = buttons;

@@ -16,7 +16,7 @@ pub const DEFAULT_DEFLECTION_MAX: f64 = 350.;
 /// Filter settings.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
-    /// Deadzone as a fraction of full scale, in `[0, 0.9]`.
+    /// Deadzone as a fraction of `deflection_max`, in `[0, 0.9]`.
     pub deadzone: f64,
     /// Multiplier per axis (`x, y, z, rx, ry, rz`); magnitude in `[0.01, 10]`, sign
     /// inverts the axis.

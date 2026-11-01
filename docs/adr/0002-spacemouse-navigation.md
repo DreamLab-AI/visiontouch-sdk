@@ -37,8 +37,7 @@ The bridge is a **demo app** beside the SDK (see ADR-0001), so everything here l
    Linux is **spacenavd**, which owns the device and serves events on a Unix socket
    (`/var/run/spnav.sock`). The bridge is a client of that socket and decodes no device
    reports of its own; spacenavd already does that work, for far more models than a
-   table here could list. (An earlier revision of this branch read the device
-   directly. It is superseded by this record and removed from the tree.)
+   table here could list.
 2. **A small pure-Rust client crate, `apps/spnav-client`** (`publish = false`). It
    implements the socket protocol from `libspnav/src/spnav.c` and `proto.h` and
    `spacenavd/src/proto_unix.c` (commit hashes in the crate documentation): a 4-byte
@@ -112,8 +111,8 @@ not that the reading matches a daemon. Specifically unverified:
 - A person at the bench steers the client's viewport from the bench machine. The client
   needs a source that turns `nav` frames into its existing navigation input; that is a
   decision for the client's own records.
-- The machine needs spacenavd installed and running, which is a package and a service,
-  not a device-permission rule. Without it the bridge works and reports why.
+- The machine needs spacenavd installed and running, which is a package and a service.
+  Without it the bridge works and reports why.
 - Subscribing is per connection and the controller is the only connection that can
   subscribe.
 - A silent client still times out after the idle timeout even while nav frames flow, by

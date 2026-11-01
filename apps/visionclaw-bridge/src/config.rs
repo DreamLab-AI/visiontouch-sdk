@@ -28,7 +28,7 @@
 //! [spacemouse]                      # optional SpaceMouse navigation through spacenavd; see `nav`
 //! enabled = false
 //! socket = "/var/run/spnav.sock"    # spacenavd's socket
-//! deadzone = 0.05                   # fraction of full scale, 0..=0.9
+//! deadzone = 0.05                   # fraction of `deflection_max`, 0..=0.9
 //! sensitivity = [1, 1, 1, 1, 1, 1]  # x y z rx ry rz; magnitude 0.01..=10, negative inverts
 //! deflection_max = 350              # spacenavd count that maps to 1.0, 1..=1000000
 //! rate_hz = 60                      # nav frames per second, 10..=120
@@ -136,7 +136,7 @@ pub struct SpacemouseConfig {
     pub enabled: bool,
     /// The spacenavd socket.
     pub socket: PathBuf,
-    /// Deadzone as a fraction of full scale, in `[0, 0.9]`.
+    /// Deadzone as a fraction of `deflection_max`, in `[0, 0.9]`.
     pub deadzone: f64,
     /// Per-axis multiplier `x, y, z, rx, ry, rz`; magnitude in `[0.01, 10]`, a negative
     /// sign inverts the axis.
