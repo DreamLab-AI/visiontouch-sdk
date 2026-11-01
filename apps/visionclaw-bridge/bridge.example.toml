@@ -1,4 +1,4 @@
-# visiontouch-bridge configuration. Copy, then set `bind`, `url` and `authorised_keys`.
+# visionclaw-bridge configuration. Copy, then set `bind`, `url` and `authorised_keys`.
 
 # This machine's LAN (or loopback) address. Wildcard and public addresses are refused
 # unless allow_public = true.
@@ -7,8 +7,8 @@ bind = "127.0.0.1:7341"
 url = "ws://127.0.0.1:7341"
 # Nostr keys (hex or npub) allowed to control the arm. Required.
 authorised_keys = ["<hex-or-npub>"]
-# Browser pages allowed to connect (their Origin). A browser not listed here is
-# refused; clients that send no Origin (non-browser) are not affected.
+# A gate for browser clients only: a browser page whose Origin is not listed is refused.
+# A native client sends no Origin and is authenticated by the signed challenge alone.
 # allowed_origins = ["http://desktop.lan:3001"]
 # device = "/dev/parport0"
 
@@ -29,13 +29,14 @@ idle_timeout_ms = 1000
 auth_timeout_ms = 5000
 status_hz = 60
 
-# Optional: steer the client's viewport with a USB SpaceMouse plugged into this machine.
-# Needs read access to /dev/hidrawN (see the README's udev rule). With no device attached
-# the bridge simply sends no navigation.
+# Optional: steer the client's viewport with a SpaceMouse plugged into this machine,
+# read through spacenavd (the Linux driver). With spacenavd absent or no device attached
+# the bridge sends no navigation, keeps running, and reports why in `nav_ok` and `status`.
 [spacemouse]
 enabled = false
-deadzone = 0.05            # fraction of full scale (0..=0.9); 0 leaves the client's own deadzone
+socket = "/var/run/spnav.sock"     # spacenavd's socket
+deadzone = 0.05            # fraction of deflection_max (0..=0.9); 0 leaves the client's own deadzone
 sensitivity = [1, 1, 1, 1, 1, 1]   # x y z rx ry rz; magnitude 0.01..=10, a negative sign inverts
-full_scale = 350           # raw count of full deflection (1..=32767)
+deflection_max = 350        # spacenavd count that maps to 1.0 (1..=1000000); tune to your spacenavd sensitivity
 rate_hz = 60               # nav frames per second while the input is non-zero (10..=120)
-poll_ms = 1000             # device scan interval while none is attached (200..=10000)
+poll_ms = 1000             # reconnect interval while spacenavd is absent (200..=10000)

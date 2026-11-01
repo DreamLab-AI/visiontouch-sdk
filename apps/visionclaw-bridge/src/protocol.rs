@@ -30,11 +30,11 @@
 //! | `auth_ok` | `pubkey` | This connection is now the controller |
 //! | `status` | see [`Status`] | Pen pose, button, arm state, gate reason, force and heat, at the configured rate |
 //! | `error` | `code`, `message` | Sent before the bridge closes the connection |
-//! | `nav_ok` | `enabled`, `hz`, `present` | Answer to `nav_subscribe`: whether the bridge offers navigation, the frame rate, and whether a device is attached now |
+//! | `nav_ok` | `enabled`, `hz`, `present`, `reason` | Answer to `nav_subscribe`: whether the bridge offers navigation, the frame rate, whether a device is attached now, and why not if it is not (`spacenavd_absent`, `spacenavd_lost`, `no_device`; else `null`). A subscribed connection's `status` messages also carry `nav_input`, the same reason or `null`, so a change after subscribing reaches the client |
 //! | `nav` | see [`NavFrame`] | One navigation frame, only after `nav_subscribe`. It carries `present` too, so a plug or unplug after subscribing is seen in the stream |
 //!
 //! ```
-//! use visiontouch_bridge::protocol::{ClientMsg, parse_client};
+//! use visionclaw_bridge::protocol::{ClientMsg, parse_client};
 //! let m = parse_client(r#"{"v":1,"type":"target","seq":7,"p":[0.01,-0.02,0.0]}"#).unwrap();
 //! assert_eq!(m, ClientMsg::Target { seq: 7, p: Some([0.01, -0.02, 0.0]), view: None });
 //! assert!(parse_client(r#"{"v":2,"type":"arm"}"#).is_err());
@@ -338,6 +338,19 @@ pub enum ServerMsg {
     },
     /// Servo state.
     Status(Status),
+    /// A `status` message sent to a connection that has subscribed to navigation. It is
+    /// the same message plus `nav_input`, so a client learns that navigation went away
+    /// (or came back) from the stream it is already reading. Added by the session
+    /// layer; the servo thread does not know about navigation.
+    #[serde(rename = "status")]
+    StatusNav {
+        /// The servo state.
+        #[serde(flatten)]
+        status: Status,
+        /// `null` while navigation input is available, else why not: `spacenavd_absent`,
+        /// `spacenavd_lost` or `no_device`.
+        nav_input: Option<&'static str>,
+    },
     /// The answer to `nav_subscribe`.
     NavOk {
         /// The bridge has SpaceMouse navigation enabled. When false no `nav` frame will
@@ -347,6 +360,10 @@ pub enum ServerMsg {
         hz: u32,
         /// A device is attached right now. Devices come and go; this is a snapshot.
         present: bool,
+        /// `null` while input is available, else why not: `spacenavd_absent`,
+        /// `spacenavd_lost` or `no_device`. Later changes arrive as `nav_input` in
+        /// `status`.
+        reason: Option<&'static str>,
     },
     /// One navigation frame.
     Nav(NavFrame),
@@ -506,12 +523,14 @@ mod tests {
                 enabled: true,
                 hz: 60,
                 present: false,
+                reason: Some("spacenavd_absent"),
             }
             .to_text(),
         )
         .unwrap();
         assert_eq!(ok["type"], "nav_ok");
         assert_eq!(ok["present"], false);
+        assert_eq!(ok["reason"], "spacenavd_absent");
     }
 
     #[test]

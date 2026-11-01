@@ -1,0 +1,12 @@
+[package]
+name = "spnav-client"
+version = "0.1.0"
+description = "Pure-Rust client of spacenavd's AF_UNIX protocol (3Dconnexion SpaceMouse input): reconnecting monitor, fail-soft"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "spnav_client"

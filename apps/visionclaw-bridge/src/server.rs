@@ -17,14 +17,14 @@
 //!
 //! Navigation (see [`crate::nav`]) is a side channel on the same session: after
 //! `nav_subscribe` from the controller, the session also sends `nav` frames at the
-//! configured rate. It reads a [`Latest`] handle and writes only to this socket; it
+//! configured rate. It reads a [`NavSource`] and writes only to this socket; it
 //! never touches the [`SharedInbox`].
 //!
 //! Release happens in a drop guard, so every exit path, including a panic in the
 //! connection task, stops force.
 use crate::auth::{self, AuthPolicy};
 use crate::config::Config;
-use crate::nav::NavStream;
+use crate::nav::{NavSource, NavStream};
 use crate::netpolicy;
 use crate::protocol::{ClientMsg, ErrorCode, ServerMsg, Status, parse_client};
 use crate::servo::{SharedInbox, Target};
@@ -43,7 +43,6 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use visiontouch_spacemouse::monitor::Latest;
 
 /// Largest accepted WebSocket message or frame, bytes.
 pub const MAX_MESSAGE_BYTES: usize = 8 * 1024;
@@ -58,7 +57,7 @@ pub struct Bridge {
     policy: AuthPolicy,
     inbox: SharedInbox,
     status: watch::Receiver<Status>,
-    nav: Option<Latest>,
+    nav: Option<NavSource>,
     started: Instant,
     next_id: AtomicU64,
     open: AtomicUsize,
@@ -80,7 +79,7 @@ impl Bridge {
         config: Config,
         inbox: SharedInbox,
         status: watch::Receiver<Status>,
-        nav: Option<Latest>,
+        nav: Option<NavSource>,
     ) -> Result<Arc<Self>, String> {
         config.validate()?;
         let policy = config.auth_policy()?;
@@ -109,18 +108,18 @@ impl Bridge {
                     let (stream, peer) = match accepted {
                         Ok(a) => a,
                         Err(e) => {
-                            eprintln!("visiontouch-bridge: accept failed: {e}");
+                            eprintln!("visionclaw-bridge: accept failed: {e}");
                             tokio::time::sleep(Duration::from_millis(50)).await;
                             continue;
                         }
                     };
                     if !netpolicy::accept_peer(peer, self.config.allow_public) {
-                        eprintln!("visiontouch-bridge: refused non-LAN peer {peer}");
+                        eprintln!("visionclaw-bridge: refused non-LAN peer {peer}");
                         continue;
                     }
                     if self.open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
                         self.open.fetch_sub(1, Ordering::SeqCst);
-                        eprintln!("visiontouch-bridge: refused {peer}: too many connections");
+                        eprintln!("visionclaw-bridge: refused {peer}: too many connections");
                         continue;
                     }
                     let bridge = self.clone();
@@ -160,7 +159,7 @@ impl Bridge {
         };
         if let Err(why) = self.session(stream, id, shutdown).await {
             eprintln!(
-                "visiontouch-bridge: connection {id} from {peer} closed: {}",
+                "visionclaw-bridge: connection {id} from {peer} closed: {}",
                 for_log(&why)
             );
         }
@@ -274,7 +273,7 @@ impl Bridge {
         let pubkey = match auth::verify(&event, &challenge, &self.policy, now_unix) {
             Ok(k) => k,
             Err(e) => {
-                eprintln!("visiontouch-bridge: connection {id}: auth refused: {e}");
+                eprintln!("visionclaw-bridge: connection {id}: auth refused: {e}");
                 close_with!(ErrorCode::Unauthorised, "authentication refused".into())
             }
         };
@@ -292,7 +291,7 @@ impl Bridge {
             close_with!(ErrorCode::Busy, "another controller is connected".into());
         }
         eprintln!(
-            "visiontouch-bridge: connection {id}: controller {}",
+            "visionclaw-bridge: connection {id}: controller {}",
             pubkey.to_hex()
         );
         send!(ServerMsg::AuthOk {
@@ -347,7 +346,7 @@ impl Bridge {
                                 }
                                 ClientMsg::NavSubscribe => {
                                     // Side channel only: no inbox field is written.
-                                    nav_stream = self.nav.as_ref().map(|n| NavStream::new(n.get().present));
+                                    nav_stream = self.nav.as_ref().map(|n| NavStream::new(n.get().present()));
                                     nav_reply = true;
                                     None
                                 }
@@ -382,7 +381,8 @@ impl Bridge {
                         send!(ServerMsg::NavOk {
                             enabled,
                             hz: if enabled { nav_hz } else { 0 },
-                            present: self.nav.as_ref().is_some_and(|n| n.get().present),
+                            present: self.nav.as_ref().is_some_and(|n| n.get().present()),
+                            reason: self.nav.as_ref().and_then(|n| n.get().reason()),
                         });
                     }
                 }
@@ -396,7 +396,15 @@ impl Bridge {
                 }
                 _ = ticker.tick() => {
                     let status = *self.status.borrow();
-                    send!(ServerMsg::Status(status));
+                    // The navigation reason is merged here, in the session, not by the
+                    // servo thread: navigation never touches the force path.
+                    match (nav_stream.as_ref(), self.nav.as_ref()) {
+                        (Some(_), Some(nav)) => send!(ServerMsg::StatusNav {
+                            status,
+                            nav_input: nav.get().reason(),
+                        }),
+                        _ => send!(ServerMsg::Status(status)),
+                    }
                 }
                 _ = tokio::time::sleep_until(deadline) => {
                     self.release_if(id);

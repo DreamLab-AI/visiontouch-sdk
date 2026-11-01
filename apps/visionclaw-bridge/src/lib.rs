@@ -1,4 +1,8 @@
-//! A network WebSocket bridge for the single-unit haptic arm.
+//! **Demo: network bridge for VisionClaw (haptic arm + SpaceMouse input).**
+//!
+//! A demo app beside the SDK, not part of it: the SDK crates (`hal`, `device`,
+//! `effects`) do not depend on it. It is a headless service: it needs no display and
+//! no TTY. A network WebSocket bridge for the single-unit haptic arm.
 //!
 //! The bridge runs on the machine the arm is plugged into. It owns the
 //! [`visiontouch_device::unit::Unit`] on a servo thread at about 400 Hz and talks to
@@ -25,7 +29,8 @@
 //!   budget applies on top. See [`config`].
 //! - **Authenticated control.** A Nostr-key challenge ([`auth`]) against an allowlist,
 //!   one controller at a time, LAN-only by default ([`netpolicy`]), browser origins
-//!   only when listed. No message before
+//!   only when listed (a gate for browser clients only: a native client is authenticated
+//!   by the signed challenge alone). No message before
 //!   authentication can arm anything, and taking control never arms by itself.
 //!
 //! # Wire schema
@@ -44,7 +49,8 @@
 //! | [`auth`] | Challenge and signature verification |
 //! | [`netpolicy`] | LAN-only bind and peer rules |
 //! | [`config`] | TOML configuration and its limits |
-//! | [`nav`] | Optional SpaceMouse navigation frames; view input only, never the force path |
+//! | [`nav`] | Optional SpaceMouse navigation frames (read through spacenavd); view input only, never the force path |
+//! | [`filter`] | Deadzone, per-axis sensitivity and clamp: spacenavd counts to normalised motion |
 //! | [`view`] | The view transform between the pen's workspace and a client's scene |
 //! | [`fake`] | A simulated unit for tests and client development |
 #![warn(missing_docs)]
@@ -52,6 +58,7 @@ pub mod auth;
 pub mod config;
 pub mod coupling;
 pub mod fake;
+pub mod filter;
 pub mod gate;
 pub mod nav;
 pub mod netpolicy;

@@ -1,31 +1,31 @@
-//! `visiontouch-bridge`: serve the arm over a WebSocket.
+//! `visionclaw-bridge`: serve the arm over a WebSocket.
 //!
 //! ```text
-//! visiontouch-bridge --config bridge.toml          # the real unit
-//! visiontouch-bridge --config bridge.toml --fake   # a simulated unit, no hardware
+//! visionclaw-bridge --config bridge.toml          # the real unit
+//! visionclaw-bridge --config bridge.toml --fake   # a simulated unit, no hardware
 //! ```
 //!
 //! With the real unit, rest the pen in its seat and click the pen button once to
 //! register; the bridge then serves clients with output off until a client arms.
 //! Ctrl+C stops it and shuts output down.
+use spnav_client::Monitor;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use visiontouch_bridge::config::Config;
-use visiontouch_bridge::fake::FakeUnit;
-use visiontouch_bridge::server::Bridge;
-use visiontouch_bridge::servo::{self, Haptic, Inbox, SERVO_PERIOD, Servo};
+use visionclaw_bridge::config::Config;
+use visionclaw_bridge::fake::FakeUnit;
+use visionclaw_bridge::nav::NavSource;
+use visionclaw_bridge::server::Bridge;
+use visionclaw_bridge::servo::{self, Haptic, Inbox, SERVO_PERIOD, Servo};
 use visiontouch_device::shutdown;
 use visiontouch_device::unit::Unit;
-use visiontouch_spacemouse::device::HidrawOpener;
-use visiontouch_spacemouse::monitor::Monitor;
 
-const USAGE: &str = "usage: visiontouch-bridge --config <file.toml> [--fake]";
+const USAGE: &str = "usage: visionclaw-bridge --config <file.toml> [--fake]";
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("visiontouch-bridge: {e}");
+        eprintln!("visionclaw-bridge: {e}");
         std::process::exit(1);
     }
 }
@@ -54,7 +54,7 @@ fn run() -> Result<(), String> {
         let unit = FakeUnit::registered();
         let script = unit.clone();
         std::thread::spawn(move || fake_hand(script));
-        eprintln!("visiontouch-bridge: simulated unit (no hardware)");
+        eprintln!("visionclaw-bridge: simulated unit (no hardware)");
         serve(unit, config).map(|_| ())
     } else {
         let mut unit = Unit::connect(&config.device)
@@ -105,7 +105,7 @@ fn serve<H: Haptic + Send + 'static>(unit: H, config: Config) -> Result<H, Strin
     let inbox = Arc::new(Mutex::new(Inbox::default()));
     let mut initial = servo::fault_status(0);
     initial.device_fault = false;
-    initial.reason = visiontouch_bridge::gate::Reason::NoLink;
+    initial.reason = visionclaw_bridge::gate::Reason::NoLink;
     let (status_tx, status_rx) = tokio::sync::watch::channel(initial);
     let stop = Arc::new(AtomicBool::new(false));
     let servo_thread = servo::spawn(
@@ -119,30 +119,26 @@ fn serve<H: Haptic + Send + 'static>(unit: H, config: Config) -> Result<H, Strin
 
     let bind = config.bind;
     // SpaceMouse navigation is optional and fails soft: its monitor thread has no link
-    // to the servo thread or the shutdown watcher below, and no device just means no
-    // navigation frames. The monitor must outlive the server.
+    // to the servo thread or the shutdown watcher below, and no spacenavd or no device
+    // just means no navigation frames. The monitor must outlive the server.
     let mouse = if config.spacemouse.enabled {
-        let opener = Box::new(HidrawOpener::system());
         match Monitor::spawn(
-            opener,
-            config.spacemouse.settings(),
+            config.spacemouse.socket.clone(),
             Duration::from_millis(config.spacemouse.poll_ms),
         ) {
             Ok(m) => Some(m),
             Err(e) => {
-                eprintln!("visiontouch-bridge: spacemouse disabled: {e}");
+                eprintln!("visionclaw-bridge: spacemouse disabled: {e}");
                 None
             }
         }
     } else {
         None
     };
-    let bridge = Bridge::with_nav(
-        config,
-        inbox,
-        status_rx.clone(),
-        mouse.as_ref().map(Monitor::latest),
-    )?;
+    let source = mouse
+        .as_ref()
+        .map(|m| NavSource::new(m.latest(), config.spacemouse.settings()));
+    let bridge = Bridge::with_nav(config, inbox, status_rx.clone(), source)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -151,7 +147,7 @@ fn serve<H: Haptic + Send + 'static>(unit: H, config: Config) -> Result<H, Strin
     let served: io::Result<()> = runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind(bind).await?;
         eprintln!(
-            "visiontouch-bridge: listening on ws://{}",
+            "visionclaw-bridge: listening on ws://{}",
             listener.local_addr()?
         );
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

@@ -1,7 +1,7 @@
 //! SpaceMouse navigation over the bridge's socket.
 //!
-//! A USB SpaceMouse plugged into the bridge's machine is read by
-//! [`visiontouch_spacemouse`]; this module decides what goes on the wire. Navigation
+//! A SpaceMouse plugged into the bridge's machine is read through spacenavd, the Linux
+//! driver, by [`spnav_client`]; this module decides what goes on the wire. Navigation
 //! is **view input only**:
 //!
 //! - It lives entirely outside the force path. Nothing here is passed to
@@ -27,9 +27,53 @@
 //!
 //! Presence is part of the stream because a client that only learns it from `nav_ok`
 //! cannot tell that a device was plugged in, or removed, after it subscribed.
+use crate::filter::{Nav, Settings};
 use crate::protocol::NavFrame;
-use visiontouch_spacemouse::filter::Nav;
-use visiontouch_spacemouse::monitor::Snapshot;
+use spnav_client::{Health, Latest};
+
+/// The navigation input at one instant: filtered motion plus the link state.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Snapshot {
+    /// Why input is, or is not, available.
+    pub health: Health,
+    /// The filtered motion and buttons; all zero unless [`Snapshot::present`].
+    pub nav: Nav,
+}
+
+impl Snapshot {
+    /// A device is attached (or, with a protocol-0 daemon, the daemon is up).
+    pub fn present(&self) -> bool {
+        self.health.present()
+    }
+
+    /// Why there is no input, `None` while there is.
+    pub fn reason(&self) -> Option<&'static str> {
+        self.health.reason()
+    }
+}
+
+/// The bridge's view of the spacenavd monitor: a [`Latest`] handle and the filter.
+#[derive(Clone, Debug)]
+pub struct NavSource {
+    latest: Latest,
+    settings: Settings,
+}
+
+impl NavSource {
+    /// Filter what `latest` publishes with `settings`.
+    pub fn new(latest: Latest, settings: Settings) -> Self {
+        Self { latest, settings }
+    }
+
+    /// The newest filtered input.
+    pub fn get(&self) -> Snapshot {
+        let s = self.latest.get();
+        Snapshot {
+            health: s.health,
+            nav: self.settings.apply(&s.axes, s.buttons),
+        }
+    }
+}
 
 /// Per-subscription streaming state.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -54,11 +98,11 @@ impl NavStream {
     /// The frame to send now for `snapshot` at `t_ms`, if any.
     pub fn next(&mut self, snapshot: &Snapshot, t_ms: u64) -> Option<NavFrame> {
         let nav = snapshot.nav;
-        if nav.is_still() && nav == self.last && snapshot.present == self.present {
+        if nav.is_still() && nav == self.last && snapshot.present() == self.present {
             return None;
         }
         self.last = nav;
-        self.present = snapshot.present;
+        self.present = snapshot.present();
         self.seq += 1;
         let [tx, ty, tz, rx, ry, rz] = nav.axes;
         Some(NavFrame {
@@ -71,7 +115,7 @@ impl NavStream {
             ry,
             rz,
             buttons: nav.buttons,
-            present: snapshot.present,
+            present: snapshot.present(),
         })
     }
 }
@@ -82,9 +126,8 @@ mod tests {
 
     fn snap(axes: [f64; 6], buttons: u32) -> Snapshot {
         Snapshot {
-            present: true,
+            health: Health::Ready,
             nav: Nav { axes, buttons },
-            version: 0,
         }
     }
 

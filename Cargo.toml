@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/hal", "crates/device", "crates/effects", "crates/bridge", "crates/spacemouse"]
+members = ["crates/hal", "crates/device", "crates/effects", "apps/spnav-client", "apps/visionclaw-bridge"]
 resolver = "3"
 
 [workspace.package]

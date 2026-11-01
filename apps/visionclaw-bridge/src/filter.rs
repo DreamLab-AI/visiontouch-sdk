@@ -1,15 +1,17 @@
 //! Deadzone, per-axis sensitivity and clamping: raw counts to normalised motion.
 //!
-//! For each axis the raw count is divided by [`Settings::full_scale`] and clamped to
+//! For each axis the spacenavd count is divided by [`Settings::deflection_max`] and clamped to
 //! `[-1, 1]`. Inside the deadzone it is zero; outside, the remainder is rescaled so the
 //! output rises smoothly from zero at the edge of the deadzone to one at full
 //! deflection, then multiplied by the axis's sensitivity and clamped to `[-1, 1]`
 //! again. A negative sensitivity inverts an axis.
-use crate::report::{AXES, RawState};
+/// Number of motion axes: `x, y, z, rx, ry, rz`.
+pub const AXES: usize = 6;
 
-/// Full-scale deflection of the current models, raw counts. Public driver sources
-/// describe about ±350; not verified on a device here, hence configurable.
-pub const DEFAULT_FULL_SCALE: f64 = 350.;
+/// The default for [`Settings::deflection_max`]. spacenavd does not normalise: its
+/// output range follows its own sensitivity setting, so this is a starting value to
+/// tune against the running daemon, not a property of any device.
+pub const DEFAULT_DEFLECTION_MAX: f64 = 350.;
 
 /// Filter settings.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -19,8 +21,8 @@ pub struct Settings {
     /// Multiplier per axis (`x, y, z, rx, ry, rz`); magnitude in `[0.01, 10]`, sign
     /// inverts the axis.
     pub sensitivity: [f64; AXES],
-    /// The raw count that counts as full deflection, in `[1, 32767]`.
-    pub full_scale: f64,
+    /// The spacenavd count that maps to full deflection (1.0), in `[1, 1000000]`.
+    pub deflection_max: f64,
 }
 
 impl Default for Settings {
@@ -28,7 +30,7 @@ impl Default for Settings {
         Self {
             deadzone: 0.05,
             sensitivity: [1.; AXES],
-            full_scale: DEFAULT_FULL_SCALE,
+            deflection_max: DEFAULT_DEFLECTION_MAX,
         }
     }
 }
@@ -55,10 +57,10 @@ impl Settings {
         if !(self.deadzone.is_finite() && (0. ..=0.9).contains(&self.deadzone)) {
             return Err(format!("deadzone {} must be in 0..=0.9", self.deadzone));
         }
-        if !(self.full_scale.is_finite() && (1. ..=32767.).contains(&self.full_scale)) {
+        if !(self.deflection_max.is_finite() && (1. ..=1_000_000.).contains(&self.deflection_max)) {
             return Err(format!(
-                "full_scale {} must be in 1..=32767",
-                self.full_scale
+                "deflection_max {} must be in 1..=1000000",
+                self.deflection_max
             ));
         }
         for (i, s) in self.sensitivity.iter().enumerate() {
@@ -71,12 +73,12 @@ impl Settings {
         Ok(())
     }
 
-    /// Filter a raw state. Settings are assumed valid (see [`Settings::validate`]);
-    /// the output is always finite and within `[-1, 1]`.
-    pub fn apply(&self, raw: &RawState) -> Nav {
+    /// Filter spacenavd axes and buttons. Settings are assumed valid (see
+    /// [`Settings::validate`]); the output is always finite and within `[-1, 1]`.
+    pub fn apply(&self, raw: &[i32; AXES], buttons: u32) -> Nav {
         let mut axes = [0.; AXES];
-        for ((out, count), gain) in axes.iter_mut().zip(raw.axes).zip(self.sensitivity) {
-            let n = (f64::from(count) / self.full_scale).clamp(-1., 1.);
+        for ((out, count), gain) in axes.iter_mut().zip(raw).zip(self.sensitivity) {
+            let n = (f64::from(*count) / self.deflection_max).clamp(-1., 1.);
             let m = n.abs();
             if m <= self.deadzone {
                 continue;
@@ -84,10 +86,7 @@ impl Settings {
             let shaped = (m - self.deadzone) / (1. - self.deadzone);
             *out = (n.signum() * shaped * gain).clamp(-1., 1.);
         }
-        Nav {
-            axes,
-            buttons: raw.buttons,
-        }
+        Nav { axes, buttons }
     }
 }
 
@@ -95,30 +94,30 @@ impl Settings {
 mod tests {
     use super::*;
 
-    fn raw(x: i16) -> RawState {
-        RawState {
-            axes: [x, 0, 0, 0, 0, 0],
-            buttons: 0,
-        }
+    fn raw(x: i32) -> [i32; AXES] {
+        [x, 0, 0, 0, 0, 0]
     }
 
     #[test]
     fn inside_the_deadzone_is_exactly_zero() {
         let s = Settings::default();
         // 5 % of 350 = 17.5: 17 is inside, 18 is out.
-        assert_eq!(s.apply(&raw(17)).axes[0], 0.);
-        assert_eq!(s.apply(&raw(-17)).axes[0], 0.);
-        assert!(s.apply(&raw(18)).axes[0] > 0.);
-        assert!(s.apply(&raw(18)).axes[0] < 0.01, "rises from zero, no jump");
+        assert_eq!(s.apply(&raw(17), 0).axes[0], 0.);
+        assert_eq!(s.apply(&raw(-17), 0).axes[0], 0.);
+        assert!(s.apply(&raw(18), 0).axes[0] > 0.);
+        assert!(
+            s.apply(&raw(18), 0).axes[0] < 0.01,
+            "rises from zero, no jump"
+        );
     }
 
     #[test]
     fn full_deflection_is_one_and_overrange_is_clamped() {
         let s = Settings::default();
-        assert_eq!(s.apply(&raw(350)).axes[0], 1.);
-        assert_eq!(s.apply(&raw(-350)).axes[0], -1.);
-        assert_eq!(s.apply(&raw(i16::MAX)).axes[0], 1.);
-        assert_eq!(s.apply(&raw(i16::MIN)).axes[0], -1.);
+        assert_eq!(s.apply(&raw(350), 0).axes[0], 1.);
+        assert_eq!(s.apply(&raw(-350), 0).axes[0], -1.);
+        assert_eq!(s.apply(&raw(i32::MAX), 0).axes[0], 1.);
+        assert_eq!(s.apply(&raw(i32::MIN), 0).axes[0], -1.);
     }
 
     #[test]
@@ -126,12 +125,9 @@ mod tests {
         let s = Settings {
             deadzone: 0.,
             sensitivity: [0.5, -1., 2., 1., 1., 1.],
-            full_scale: 100.,
+            deflection_max: 100.,
         };
-        let n = s.apply(&RawState {
-            axes: [100, 100, 30, 0, 0, 0],
-            buttons: 0,
-        });
+        let n = s.apply(&[100, 100, 30, 0, 0, 0], 0);
         assert_eq!(n.axes[0], 0.5);
         assert_eq!(n.axes[1], -1.);
         assert!((n.axes[2] - 0.6).abs() < 1e-12);
@@ -144,15 +140,12 @@ mod tests {
             sensitivity: [10.; 6],
             ..Settings::default()
         };
-        assert_eq!(s.apply(&raw(300)).axes[0], 1.);
+        assert_eq!(s.apply(&raw(300), 0).axes[0], 1.);
     }
 
     #[test]
     fn buttons_pass_through_and_are_not_motion() {
-        let n = Settings::default().apply(&RawState {
-            axes: [0; 6],
-            buttons: 5,
-        });
+        let n = Settings::default().apply(&[0; 6], 5);
         assert_eq!(n.buttons, 5);
         assert!(n.is_still());
     }
@@ -174,11 +167,11 @@ mod tests {
                 ..Settings::default()
             },
             Settings {
-                full_scale: 0.,
+                deflection_max: 0.,
                 ..Settings::default()
             },
             Settings {
-                full_scale: 40000.,
+                deflection_max: 2_000_000.,
                 ..Settings::default()
             },
             Settings {

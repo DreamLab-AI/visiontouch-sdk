@@ -21,7 +21,7 @@
 //! motion from ever becoming a force step.
 //!
 //! ```
-//! use visiontouch_bridge::view::View;
+//! use visionclaw_bridge::view::View;
 //! // Scene is 1000 units per metre, origin at (5, 0, 0), no rotation.
 //! let v = View::new([5., 0., 0.], [0., 0., 0., 1.], 1000.).unwrap();
 //! let d = v.to_device([15., 0., 0.]);

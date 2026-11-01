@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
-use visiontouch_bridge::config::Config;
-use visiontouch_bridge::fake::FakeUnit;
-use visiontouch_bridge::server::Bridge;
-use visiontouch_bridge::servo::{self, Inbox, Servo};
+use visionclaw_bridge::config::Config;
+use visionclaw_bridge::fake::FakeUnit;
+use visionclaw_bridge::server::Bridge;
+use visionclaw_bridge::servo::{self, Inbox, Servo};
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 

@@ -1,20 +1,21 @@
 //! SpaceMouse navigation end to end: a real WebSocket on 127.0.0.1, the simulated arm,
-//! and a scripted SpaceMouse. Nothing here opens hardware.
+//! and a fake spacenavd on a Unix socket. Nothing here opens hardware.
 use futures_util::{SinkExt, StreamExt};
 use nostr::prelude::*;
 use serde_json::{Value, json};
+use spnav_client::testing::FakeDaemon;
+use spnav_client::{Health, Monitor};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
-use visiontouch_bridge::config::Config;
-use visiontouch_bridge::fake::FakeUnit;
-use visiontouch_bridge::server::Bridge;
-use visiontouch_bridge::servo::{self, Inbox, Servo};
-use visiontouch_spacemouse::monitor::Monitor;
-use visiontouch_spacemouse::testing::ScriptedDevice;
+use visionclaw_bridge::config::Config;
+use visionclaw_bridge::fake::FakeUnit;
+use visionclaw_bridge::nav::NavSource;
+use visionclaw_bridge::server::Bridge;
+use visionclaw_bridge::servo::{self, Inbox, Servo};
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -29,7 +30,7 @@ struct Rig {
     url: String,
     keys: Keys,
     fake: FakeUnit,
-    pad: ScriptedDevice,
+    pad: FakeDaemon,
     stop: Arc<AtomicBool>,
     shutdown: tokio::sync::watch::Sender<bool>,
     _monitor: Option<Monitor>,
@@ -44,19 +45,21 @@ impl Drop for Rig {
 
 async fn rig(nav: Nav) -> Rig {
     let keys = Keys::generate();
-    let spacemouse =
-        if nav == (Nav::Enabled { plugged: false }) || nav == (Nav::Enabled { plugged: true }) {
-            "[spacemouse]\nenabled = true\nrate_hz = 60\npoll_ms = 200\n"
-        } else {
-            ""
-        };
+    let pad = FakeDaemon::at(spnav_client::testing::unique_socket_path()).unwrap();
+    let spacemouse = if matches!(nav, Nav::Enabled { .. }) {
+        format!(
+            "[spacemouse]\nenabled = true\nsocket = \"{}\"\nrate_hz = 60\npoll_ms = 200\n",
+            pad.path().display()
+        )
+    } else {
+        String::new()
+    };
     let config = Config::from_toml(&format!(
         "url = \"ws://bridge\"\nauthorised_keys = [\"{}\"]\n[link]\ntarget_timeout_ms = 100\n\
          idle_timeout_ms = 400\nauth_timeout_ms = 1000\nstatus_hz = 100\n{spacemouse}",
         keys.public_key().to_hex()
     ))
     .unwrap();
-    let pad = ScriptedDevice::new();
     let monitor = match nav {
         Nav::Enabled { plugged } => {
             if plugged {
@@ -64,8 +67,7 @@ async fn rig(nav: Nav) -> Rig {
             }
             Some(
                 Monitor::spawn(
-                    pad.opener(),
-                    config.spacemouse.settings(),
+                    config.spacemouse.socket.clone(),
                     Duration::from_millis(config.spacemouse.poll_ms),
                 )
                 .unwrap(),
@@ -73,11 +75,17 @@ async fn rig(nav: Nav) -> Rig {
         }
         Nav::Disabled => None,
     };
-    if nav == (Nav::Enabled { plugged: true }) {
+    if let Some(m) = &monitor {
         // Subscriptions are seeded from the presence at subscribe time, so wait for the
-        // monitor to have opened the device before any test subscribes.
-        let latest = monitor.as_ref().unwrap().latest();
-        wait_until("device opened", || latest.get().present).await;
+        // monitor to have connected and learned the device state before any test
+        // subscribes.
+        let latest = m.latest();
+        let want = if nav == (Nav::Enabled { plugged: true }) {
+            Health::Ready
+        } else {
+            Health::NoDevice
+        };
+        wait_until("daemon state learned", || latest.get().health == want).await;
     }
     let fake = FakeUnit::registered();
     let inbox = Arc::new(Mutex::new(Inbox::default()));
@@ -97,8 +105,10 @@ async fn rig(nav: Nav) -> Rig {
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
     // Disabled in the config means no handle is offered, whatever the caller passes.
-    let bridge =
-        Bridge::with_nav(config, inbox, rx, monitor.as_ref().map(Monitor::latest)).unwrap();
+    let source = monitor
+        .as_ref()
+        .map(|m| NavSource::new(m.latest(), config.spacemouse.settings()));
+    let bridge = Bridge::with_nav(config, inbox, rx, source).unwrap();
     tokio::spawn(bridge.serve(listener, shutdown_rx));
     Rig {
         url,
@@ -220,7 +230,7 @@ async fn an_authenticated_subscriber_gets_bounded_frames_then_one_zero_frame() {
         (json!(true), json!(60))
     );
     wait_until("device read", || {
-        r._monitor.as_ref().unwrap().latest().get().present
+        r._monitor.as_ref().unwrap().latest().get().health.present()
     })
     .await;
 
@@ -276,7 +286,7 @@ async fn an_authenticated_subscriber_gets_bounded_frames_then_one_zero_frame() {
 async fn an_unauthenticated_client_gets_nothing() {
     let r = rig(Nav::Enabled { plugged: true }).await;
     wait_until("device read", || {
-        r._monitor.as_ref().unwrap().latest().get().present
+        r._monitor.as_ref().unwrap().latest().get().health.present()
     })
     .await;
     r.pad.push_translation(350, 350, 350);
@@ -312,7 +322,7 @@ async fn a_v1_client_that_never_subscribes_sees_no_nav_message() {
     let r = rig(Nav::Enabled { plugged: true }).await;
     let mut ws = authed(&r).await;
     wait_until("device read", || {
-        r._monitor.as_ref().unwrap().latest().get().present
+        r._monitor.as_ref().unwrap().latest().get().health.present()
     })
     .await;
     r.pad.push_translation(350, 0, 0);
@@ -330,7 +340,7 @@ async fn a_busy_second_client_gets_no_nav() {
     let mut first = authed(&r).await;
     subscribe(&mut first).await;
     wait_until("device read", || {
-        r._monitor.as_ref().unwrap().latest().get().present
+        r._monitor.as_ref().unwrap().latest().get().health.present()
     })
     .await;
     r.pad.push_translation(350, 0, 0);
@@ -363,7 +373,7 @@ async fn no_device_then_a_device_then_none_again() {
 
     r.pad.plug();
     wait_until("hot-plugged", || {
-        r._monitor.as_ref().unwrap().latest().get().present
+        r._monitor.as_ref().unwrap().latest().get().health.present()
     })
     .await;
     let plugged = pump(&mut ws, Duration::from_millis(200), &mut seq, None).await;
@@ -423,7 +433,7 @@ async fn unsubscribing_stops_the_frames() {
     let mut ws = authed(&r).await;
     subscribe(&mut ws).await;
     wait_until("device read", || {
-        r._monitor.as_ref().unwrap().latest().get().present
+        r._monitor.as_ref().unwrap().latest().get().health.present()
     })
     .await;
     r.pad.push_translation(350, 0, 0);
@@ -483,7 +493,7 @@ async fn navigation_during_a_hold_never_steps_force() {
     let (mut ws, mut seq) = engaged(&r, target).await;
     subscribe(&mut ws).await;
     wait_until("device read", || {
-        r._monitor.as_ref().unwrap().latest().get().present
+        r._monitor.as_ref().unwrap().latest().get().health.present()
     })
     .await;
     let settle = pump(&mut ws, Duration::from_millis(900), &mut seq, Some(target)).await;
@@ -555,7 +565,7 @@ async fn a_view_steered_by_navigation_under_a_hold_stays_within_the_force_limits
     let (mut ws, mut seq) = engaged(&r, [0.002, 0., 0.]).await;
     subscribe(&mut ws).await;
     wait_until("device read", || {
-        r._monitor.as_ref().unwrap().latest().get().present
+        r._monitor.as_ref().unwrap().latest().get().health.present()
     })
     .await;
 
@@ -618,4 +628,58 @@ async fn a_view_steered_by_navigation_under_a_hold_stays_within_the_force_limits
         }
     }
     assert!(checked > 50, "enough anchor samples: {checked}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_absent_spacenavd_is_a_reason_in_nav_ok_and_status_and_the_bridge_carries_on() {
+    let mut r = rig(Nav::Enabled { plugged: false }).await;
+    r.pad.halt();
+    let latest = r._monitor.as_ref().unwrap().latest();
+    wait_until("daemon seen to be gone", || {
+        latest.get().health == Health::DaemonAbsent
+    })
+    .await;
+    let mut ws = authed(&r).await;
+    let ok = subscribe(&mut ws).await;
+    assert_eq!(ok["present"], false);
+    assert_eq!(ok["reason"], "spacenavd_absent");
+    let mut seq = 0;
+    let got = pump(&mut ws, Duration::from_millis(300), &mut seq, None).await;
+    assert!(navs(&got).is_empty(), "no nav frames without a daemon");
+    let status = got.iter().rev().find(|m| m["type"] == "status").unwrap();
+    assert_eq!(status["nav_input"], "spacenavd_absent");
+    assert!(status["t_ms"].is_u64(), "the servo status is still flowing");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spacenavd_that_dies_after_subscribing_ends_in_a_zero_absent_frame_and_a_status_reason() {
+    let mut r = rig(Nav::Enabled { plugged: true }).await;
+    let mut ws = authed(&r).await;
+    let ok = subscribe(&mut ws).await;
+    assert_eq!(
+        (ok["present"].clone(), ok["reason"].clone()),
+        (json!(true), Value::Null)
+    );
+    r.pad.push_translation(0, 0, 350);
+    let mut seq = 0;
+    let live = pump(&mut ws, Duration::from_millis(200), &mut seq, None).await;
+    assert_eq!(navs(&live).last().unwrap()["tz"], 1.0);
+    assert!(
+        live.iter()
+            .filter(|m| m["type"] == "status")
+            .all(|m| m["nav_input"].is_null()),
+        "a healthy link reports null"
+    );
+    r.pad.halt();
+    let gone = pump(&mut ws, Duration::from_millis(500), &mut seq, None).await;
+    let last = *navs(&gone).last().unwrap();
+    assert_eq!(
+        (last["tz"].clone(), last["present"].clone()),
+        (json!(0.0), json!(false))
+    );
+    let status = gone.iter().rev().find(|m| m["type"] == "status").unwrap();
+    assert!(
+        ["spacenavd_lost", "spacenavd_absent"].contains(&status["nav_input"].as_str().unwrap()),
+        "{status}"
+    );
 }

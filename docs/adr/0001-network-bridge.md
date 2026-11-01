@@ -7,7 +7,7 @@ implementation_status: complete
 activation_status: inactive
 supersedes: []
 superseded_by: []
-verified_paths: [crates/bridge/src, crates/bridge/tests/e2e.rs, crates/bridge/bridge.example.toml]
+verified_paths: [apps/visionclaw-bridge/src, apps/visionclaw-bridge/tests/e2e.rs, apps/visionclaw-bridge/bridge.example.toml]
 review_trigger: the first attended session with the arm on the bridge, any change to the coupling limits, a client that needs a coupling the bridge does not offer, or a request for a second simultaneous controller
 ---
 
@@ -34,7 +34,7 @@ not a rougher force.
 
 ## Decision
 
-A new crate, `visiontouch-bridge` (library and binary), in this workspace. `Unit` and
+A **demo app**, `visionclaw-bridge` (library and binary), in `apps/visionclaw-bridge` of this workspace, with `publish = false`. It sits beside the SDK and is not part of it: `visiontouch-hal`, `visiontouch-device` and `visiontouch-effects` do not depend on it, and it is never published. `Unit` and
 the other crates are unchanged.
 
 1. **Local coupling.** The bridge runs `Unit` on its own OS thread at the SDK's pace.
@@ -77,7 +77,10 @@ the other crates are unchanged.
    public address, and any non-loopback, non-private, non-link-local peer, is refused
    unless `allow_public = true`. A request carrying a browser `Origin` is refused
    unless that origin is listed, so a page the operator did not choose cannot reach the
-   arm through a permissive signer. Frames are capped at 8 KiB and connections at 8.
+   arm through a permissive signer. `allowed_origins` is a gate for browser clients
+   only: a native client sends no `Origin` and is authenticated by the signed challenge
+   alone. The bridge is a headless service: it needs no display and no TTY (the README
+   has a systemd unit for that). Frames are capped at 8 KiB and connections at 8.
 7. **Schema.** Versioned JSON text frames, `"v": 1`. In: `auth`, `arm`, `disarm`,
    `target {seq, p | null}`. Out: `hello {challenge, limits}`, `auth_ok`, `status`
    (pen, button, deadman, arm, gate reason, anchor, force, heat, target age), `error`.

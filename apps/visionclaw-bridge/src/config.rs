@@ -4,7 +4,7 @@
 //! bind = "192.168.1.20:7341"        # this machine's LAN address; default 127.0.0.1:7341
 //! url = "ws://192.168.1.20:7341"    # required: the URL clients must name when signing
 //! authorised_keys = ["npub1..."]    # required: hex or npub keys allowed to control the arm
-//! # allowed_origins = ["http://desktop.lan:3001"]  # browser pages allowed to connect
+//! # allowed_origins = ["http://desktop.lan:3001"]  # gate for browser clients only
 //! # allow_public = false            # wildcard or public bind and public peers
 //! # device = "/dev/parport0"
 //!
@@ -25,16 +25,18 @@
 //! auth_timeout_ms = 5000
 //! status_hz = 60
 //!
-//! [spacemouse]                      # optional USB SpaceMouse navigation; see `nav`
+//! [spacemouse]                      # optional SpaceMouse navigation through spacenavd; see `nav`
 //! enabled = false
+//! socket = "/var/run/spnav.sock"    # spacenavd's socket
 //! deadzone = 0.05                   # fraction of full scale, 0..=0.9
 //! sensitivity = [1, 1, 1, 1, 1, 1]  # x y z rx ry rz; magnitude 0.01..=10, negative inverts
-//! full_scale = 350                  # raw count of full deflection, 1..=32767
+//! deflection_max = 350              # spacenavd count that maps to 1.0, 1..=1000000
 //! rate_hz = 60                      # nav frames per second, 10..=120
-//! poll_ms = 1000                    # device scan interval while none is attached
+//! poll_ms = 1000                    # reconnect interval while spacenavd is absent
 //! ```
 use crate::auth::AuthPolicy;
 use crate::coupling::{Coupling, TargetFilter};
+use crate::filter::Settings;
 use crate::netpolicy;
 use crate::protocol::Limits;
 use serde::Deserialize;
@@ -42,7 +44,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 use visiontouch_device::unit::{CONTINUOUS_N, PEAK_N, STABLE_STIFFNESS_N_MM};
-use visiontouch_spacemouse::filter::Settings;
 
 /// Highest coupling stiffness the bridge accepts, N/mm: half the unit's stable figure.
 ///
@@ -125,24 +126,28 @@ impl Default for LinkConfig {
     }
 }
 
-/// The `[spacemouse]` section: optional navigation from a USB SpaceMouse plugged into
-/// this machine. Disabled unless `enabled = true`; an enabled bridge with no device
-/// attached simply sends no navigation.
+/// The `[spacemouse]` section: optional navigation from a SpaceMouse plugged into this
+/// machine and served by spacenavd. Disabled unless `enabled = true`; an enabled
+/// bridge with no spacenavd or no device simply sends no navigation, and says why.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct SpacemouseConfig {
-    /// Read a SpaceMouse and offer navigation to subscribed clients.
+    /// Read a SpaceMouse through spacenavd and offer navigation to subscribed clients.
     pub enabled: bool,
+    /// The spacenavd socket.
+    pub socket: PathBuf,
     /// Deadzone as a fraction of full scale, in `[0, 0.9]`.
     pub deadzone: f64,
     /// Per-axis multiplier `x, y, z, rx, ry, rz`; magnitude in `[0.01, 10]`, a negative
     /// sign inverts the axis.
     pub sensitivity: [f64; 6],
-    /// The raw count that counts as full deflection, in `[1, 32767]`.
-    pub full_scale: f64,
+    /// The spacenavd count that maps to full deflection (1.0), in `[1, 1000000]`.
+    /// spacenavd does not normalise; its range follows its own sensitivity setting.
+    pub deflection_max: f64,
     /// Navigation frames per second while the input is non-zero, in `[10, 120]`.
     pub rate_hz: u32,
-    /// Milliseconds between device scans while none is attached, in `[200, 10000]`.
+    /// Milliseconds between connection attempts while spacenavd is absent or lost, in
+    /// `[200, 10000]`.
     pub poll_ms: u64,
 }
 
@@ -151,9 +156,10 @@ impl Default for SpacemouseConfig {
         let s = Settings::default();
         Self {
             enabled: false,
+            socket: PathBuf::from(spnav_client::DEFAULT_SOCKET),
             deadzone: s.deadzone,
             sensitivity: s.sensitivity,
-            full_scale: s.full_scale,
+            deflection_max: s.deflection_max,
             rate_hz: 60,
             poll_ms: 1000,
         }
@@ -166,7 +172,7 @@ impl SpacemouseConfig {
         Settings {
             deadzone: self.deadzone,
             sensitivity: self.sensitivity,
-            full_scale: self.full_scale,
+            deflection_max: self.deflection_max,
         }
     }
 }
@@ -187,9 +193,10 @@ pub struct Config {
     pub url: String,
     /// Keys (hex or npub) allowed to control the arm. Must not be empty.
     pub authorised_keys: Vec<String>,
-    /// Browser `Origin` values allowed to connect. A request carrying an `Origin`
-    /// header not in this list is refused, so an empty list admits only non-browser
-    /// clients (which send none).
+    /// Browser `Origin` values allowed to connect. This is a gate for browser clients
+    /// only: a request carrying an `Origin` header not in this list is refused, so an
+    /// empty list admits only clients that send none. A native client is not subject
+    /// to it and is authenticated by the signed challenge alone.
     #[serde(default)]
     pub allowed_origins: Vec<String>,
     /// Parallel port device.
@@ -465,7 +472,8 @@ mod tests {
             "deadzone = -0.1",
             "sensitivity = [1, 1, 1, 1, 1, 0]",
             "sensitivity = [1, 1, 1, 1, 1, 11]",
-            "full_scale = 0",
+            "deflection_max = 0",
+            "deflection_max = 2000000",
             "rate_hz = 9",
             "rate_hz = 121",
             "poll_ms = 100",
